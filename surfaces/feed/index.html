@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>snarky-task — feed</title>
+  <link rel="stylesheet" href="/feed/feed.css" />
+</head>
+<body>
+  <section id="done" class="done-section"></section>
+  <section id="rows"></section>
+  <form id="prompt">
+    <span class="chevron">›</span>
+    <textarea id="input" rows="1" autocomplete="off" autofocus
+      placeholder="type an instruction — #card links, 'clean' sweeps, 'clear' wipes"></textarea>
+    <div id="complete" hidden></div>
+  </form>
+  <script type="module" src="/feed/feed.js"></script>
+</body>
+</html>

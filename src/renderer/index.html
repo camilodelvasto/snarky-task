@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>taskdeck</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:" />
+    <style>
+      /* Theme tokens — light default; set data-theme="dark" on <html> to flip (keep in sync with surfaces/*.css) */
+      :root { --bg: #f4f5f8; --text: #1f2430; --divider: #e3e6ec; }
+      html[data-theme='dark'] { --bg: #0f0f1a; --text: #fff; --divider: #2a2a38; }
+      html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); height: 100%; }
+      #divider { position: fixed; top: 0; bottom: 0; width: 4px; cursor: col-resize; background: var(--divider); }
+    </style>
+  </head>
+  <body>
+    <div id="divider"></div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

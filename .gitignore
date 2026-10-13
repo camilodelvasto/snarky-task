@@ -1,0 +1,17 @@
+node_modules
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
+*.tsbuildinfo
+persona.db
+persona.db-*
+.superpowers/
+.astro/
+workspace/tasks/queue/*
+workspace/tasks/cards/*
+workspace/tasks/artifacts/*
+workspace/tasks/history/*
+!workspace/tasks/**/.gitkeep
+models/

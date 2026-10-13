@@ -1,0 +1,17 @@
+{
+  "resolver": { "impl": "ollama", "host": "http://127.0.0.1:11434", "model": "qwen3:4b" },
+  "dates": { "impl": "chrono" },
+  "generator": { "impl": "ollama", "host": "http://127.0.0.1:11434", "model": "qwen3:4b" },
+  "agent": { "impl": "claude-cli", "enabled": true },
+  "thresholds": { "card": 0.6 },
+  "jobs": { "max_parallel": 3 },
+  "confirmation_timeout_s": 300,
+  "ui": {
+    "highlight_labels": ["highlight"],
+    "accent_labels": { "urgent": "fire", "important": "violet" }
+  },
+  "collaborators": {
+    "claude": { "use": "agent" },
+    "local": { "use": "generator" }
+  }
+}
