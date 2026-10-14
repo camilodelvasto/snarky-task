@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Publish a snapshot of the current taskdeck tree as ONE commit on `release`
+# and push it to the public repo. Dev history never leaves this machine:
+# the release commit's only parent is the previous release commit.
+#
+#   npm run release -- "sync: what changed"
+#
+# The commit body carries a [taskdeck@<sha>] breadcrumb and the dev branch is
+# tagged rel/<n>, so a bug reported against a public release maps back to an
+# exact private commit range for blame/bisect.
+set -euo pipefail
+
+msg="${1:-sync release}"
+base=$(git rev-parse --short taskdeck)
+
+new=$(git commit-tree "taskdeck^{tree}" -p release -m "$msg
+
+[taskdeck@$base]")
+git branch -f release "$new"
+n=$(git rev-list --count release)
+git tag -f "rel/$n" taskdeck
+
+echo "release → $(git rev-parse --short release)  (snapshot of taskdeck@$base, tag rel/$n)"
+git push public release:main

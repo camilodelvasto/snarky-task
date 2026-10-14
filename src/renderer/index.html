@@ -2,17 +2,48 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>taskdeck</title>
+    <title>snarky-task</title>
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:" />
     <style>
       /* Theme tokens — light default; set data-theme="dark" on <html> to flip (keep in sync with surfaces/*.css) */
-      :root { --bg: #f4f5f8; --text: #1f2430; --divider: #e3e6ec; }
+      :root { --bg: #f4f5f8; --text: #1f2430; --divider: #e3e6ec; --accent: #ff1055; }
       html[data-theme='dark'] { --bg: #0f0f1a; --text: #fff; --divider: #2a2a38; }
       html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); height: 100%; }
-      #divider { position: fixed; top: 0; bottom: 0; width: 4px; cursor: col-resize; background: var(--divider); }
+      /* Titlebar strip: the window is hiddenInset, so this hosts the traffic
+         lights (left inset) and doubles as the drag region. The surface views
+         are laid out below it (see TITLEBAR in src/main.ts). */
+      #titlebar {
+        position: fixed; top: 0; left: 0; right: 0; height: 38px;
+        display: flex; align-items: center; gap: 7px;
+        padding-left: 84px; /* clear the macOS traffic lights */
+        border-bottom: 1px solid var(--divider);
+        -webkit-app-region: drag;
+        user-select: none;
+      }
+      #titlebar .name {
+        font: 600 11px/1 Menlo, Monaco, monospace;
+        letter-spacing: 0.08em;
+        opacity: 0.75;
+      }
+      #titlebar svg { display: block; }
+      #divider { position: fixed; top: 38px; bottom: 0; width: 4px; cursor: col-resize; background: var(--divider); }
     </style>
   </head>
   <body>
+    <div id="titlebar">
+      <!-- 8-bit mark: the CLI marker ›_ as pixel art -->
+      <svg width="16" height="16" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
+        <rect x="1" y="1" width="1" height="1" fill="var(--accent)"/>
+        <rect x="2" y="2" width="1" height="1" fill="var(--accent)"/>
+        <rect x="3" y="3" width="1" height="1" fill="var(--accent)"/>
+        <rect x="2" y="4" width="1" height="1" fill="var(--accent)"/>
+        <rect x="1" y="5" width="1" height="1" fill="var(--accent)"/>
+        <rect x="4" y="6" width="1" height="1" fill="var(--text)"/>
+        <rect x="5" y="6" width="1" height="1" fill="var(--text)"/>
+        <rect x="6" y="6" width="1" height="1" fill="var(--text)"/>
+      </svg>
+      <span class="name">snarky-task</span>
+    </div>
     <div id="divider"></div>
     <script type="module" src="./src/main.ts"></script>
   </body>

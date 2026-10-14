@@ -50,12 +50,15 @@ async function boot(): Promise<void> {
   broadcastFn = server.broadcast
 
   mainWindow = new BrowserWindow({
-    width: 1400,
+    width: 1400, // fallback size for un-maximized state
     height: 900,
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#0f0f1a',
     webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: false }
   })
+  // Open maximized: full screen real estate without entering the macOS
+  // fullscreen space (green-button fullscreen still available).
+  mainWindow.maximize()
 
   screenshotCleaner.start()
 
