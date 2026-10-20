@@ -16,10 +16,12 @@ export class SurfaceViews {
     this.feed.webContents.loadURL(`${baseUrl}/feed/`)
     this.board.webContents.loadURL(`${baseUrl}/board/`)
 
-    // Cmd/Ctrl+K and Cmd/Ctrl+L from either surface jump to the console input
-    // (L for address-bar muscle memory) — the views are separate webContents,
-    // so a page-level listener can't cross them; intercept in the main process.
-    for (const wc of [this.feed.webContents, this.board.webContents]) {
+    // Cmd/Ctrl+K and Cmd/Ctrl+L jump to the console input (L for address-bar
+    // muscle memory). The two surfaces and the host window are separate
+    // webContents and a page-level listener can't cross them, so intercept in
+    // the main process on ALL three — including the host window, which holds
+    // keyboard focus at launch and whenever its chrome/divider is clicked.
+    for (const wc of [window.webContents, this.feed.webContents, this.board.webContents]) {
       wc.on('before-input-event', (e, input) => {
         if (
           input.type === 'keyDown' &&

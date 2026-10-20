@@ -26,6 +26,13 @@ it('derives a snapshot from files, skipping unparseable ones', () => {
   expect(snap.cards.map((c) => c.shortname)).toEqual(['a-card'])
 })
 
+it('tolerates a missing subdir (synced workspace drops empty dirs) without throwing', () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
+  mkdirSync(join(dir, 'cards'), { recursive: true }) // only cards/ exists; no queue/ or artifacts/
+  expect(() => readSnapshot(dir)).not.toThrow()
+  expect(readSnapshot(dir).instructions).toEqual([])
+})
+
 it('snapshot includes artifact filenames for a card with files in artifacts/<shortname>/', () => {
   const dir = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
   for (const d of ['queue', 'cards', 'artifacts']) mkdirSync(join(dir, d), { recursive: true })

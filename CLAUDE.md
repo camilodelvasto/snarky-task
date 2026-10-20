@@ -18,7 +18,7 @@ workspace/
   .mcp.json
 ```
 
-Files are the state. Every input path (type in the feed, POST to the API, MCP `task` tool, hand-edit) ends as a write here. The watcher reconciles. Hand edits are first-class.
+Files are the state. Every input path (type in the feed, POST to the API, MCP `task` tool, hand-edit) ends as a write here. The watcher reconciles. Hand edits are first-class. Cards and instructions carry a `v:` schema version and are validated against bundled JSON Schemas (`src/main/tasks/schema/`) at read and write. The `/check` meta command validates the whole workspace, ensuring every card and instruction conforms to its schema version. See `docs/specs/2026-10-20-content-schema-validation-design.md`.
 
 - Each project owns its full `tasks/` set, including `config.json` and `registry.json` — a canvas project can have different collaborators or thresholds than the default one.
 - **Migration (one-time, at boot):** if `workspace/tasks` exists and `workspace/projects` does not, it moves to `workspace/projects/default/tasks` and `current` is written. Hand-rollable backwards by moving it back.
@@ -48,6 +48,8 @@ The workspace root is resolved in this order:
 1. `XWEB_WORKSPACE` env var when set
 2. First line of `~/.config/snarky-task/root` when it names an existing directory (trimmed, `~` expanded; stale pointer warns and falls through) — point it at a Syncthing or git-synced folder to move your data off-repo
 3. `./workspace` relative to the app root
+
+**Synced workspaces (two machines, one folder).** Each machine has a device id in `~/.config/snarky-task/device` (written once on first boot, never synced). Instructions carry `device:` in frontmatter: the first engine to see an unowned instruction stamps it; only the owner runs, crash-recovers, or TTL-sweeps it. Another device's rows show in the feed; requeueing one takes ownership. A synced card change that arrives with log lines this engine hasn't seen was logged at the source and is absorbed, not re-logged as `(direct edit)`. Upgrade and boot once on the existing machine before sharing the folder so legacy instructions are claimed there.
 
 ## Surfaces
 

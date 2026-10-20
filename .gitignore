@@ -14,3 +14,4 @@ workspace/current
 workspace/.trash/
 !workspace/templates/
 models/
+*.swp

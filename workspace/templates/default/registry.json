@@ -73,6 +73,9 @@
   "clear": {
     "class": "meta"
   },
+  "check": {
+    "class": "meta"
+  },
   "project": {
     "class": "meta"
   },

@@ -76,7 +76,7 @@ afterEach(async () => {
 describe('ProjectManager', () => {
   it('boot() migrates a legacy workspace/tasks layout to projects/default/tasks', async () => {
     const root = makeLegacyRoot()
-    const pm = new ProjectManager(root, '', () => {})
+    const pm = new ProjectManager(root, '', 'this-mac', () => {})
     managers.push(pm)
     await pm.boot()
     // migration happened: legacy tasks gone, projects/default/tasks exists
@@ -87,7 +87,7 @@ describe('ProjectManager', () => {
 
   it('an instruction processed by the engine lands a card in projects/default/tasks/cards', async () => {
     const root = makeProjectsRoot()
-    const pm = new ProjectManager(root, '', () => {})
+    const pm = new ProjectManager(root, '', 'this-mac', () => {})
     managers.push(pm)
     await pm.boot()
     const id = writeInstruction(pm.getTasksDir(), '+ hello world', new Date('2026-10-02T10:00:00'))
@@ -105,7 +105,7 @@ describe('ProjectManager', () => {
     createProject(root, 'house', new Date('2026-10-01'))
     // house project needs config + registry (createProject copies from default)
     // but default already has them so the copy should have worked
-    const pm = new ProjectManager(root, '', () => {})
+    const pm = new ProjectManager(root, '', 'this-mac', () => {})
     managers.push(pm)
     await pm.boot()
     expect(pm.getTasksDir()).toBe(join(root, 'projects', 'default', 'tasks'))
@@ -126,7 +126,7 @@ describe('ProjectManager', () => {
 
   it('pm.stop() closes cleanly', async () => {
     const root = makeProjectsRoot()
-    const pm = new ProjectManager(root, '', () => {})
+    const pm = new ProjectManager(root, '', 'this-mac', () => {})
     await pm.boot()
     await expect(pm.stop()).resolves.not.toThrow()
   })
@@ -136,7 +136,7 @@ describe('ProjectManager', () => {
     const root = makeProjectsRoot()
     const appTplDir = makeAppTemplatesDir()
     expect(existsSync(join(root, 'templates'))).toBe(false)
-    const pm = new ProjectManager(root, appTplDir, () => {})
+    const pm = new ProjectManager(root, appTplDir, 'this-mac', () => {})
     managers.push(pm)
     await pm.boot()
     // templates/default must now exist in the root
@@ -150,7 +150,7 @@ describe('ProjectManager', () => {
     const tplDefault = join(root, 'templates', 'default')
     mkdirSync(tplDefault, { recursive: true })
     writeFileSync(join(tplDefault, 'config.json'), '{"sentinel":true}')
-    const pm = new ProjectManager(root, appTplDir, () => {})
+    const pm = new ProjectManager(root, appTplDir, 'this-mac', () => {})
     managers.push(pm)
     await pm.boot()
     // Must NOT overwrite
@@ -162,7 +162,7 @@ describe('ProjectManager', () => {
     const root = makeProjectsRoot()
     // Create a second project to act as "active" to remove
     createProject(root, 'to-remove', new Date('2026-10-01'))
-    const pm = new ProjectManager(root, '', () => {})
+    const pm = new ProjectManager(root, '', 'this-mac', () => {})
     managers.push(pm)
     await pm.boot()
     // Switch to the project we'll remove

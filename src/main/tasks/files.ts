@@ -1,8 +1,18 @@
 import matter from 'gray-matter'
-import { readFileSync, writeFileSync, appendFileSync } from 'fs'
-import { join, basename } from 'path'
+import { readFileSync, writeFileSync, renameSync, appendFileSync, mkdirSync } from 'fs'
+import { join, basename, dirname } from 'path'
 import { randomBytes } from 'crypto'
 import type { Card, Instruction } from './types'
+import { validateCard, validateInstruction, formatErrors } from './validate'
+
+export function writeFileAtomic(path: string, data: string): void {
+  // The parent dir may be missing on a synced workspace (Syncthing drops empty
+  // dirs); guarantee it before writing so a write never ENOENTs.
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(3).toString('hex')}.tmp`)
+  writeFileSync(tmp, data)
+  renameSync(tmp, path)
+}
 
 export function slugify(title: string, taken: Set<string>): string {
   const full = title
@@ -45,7 +55,7 @@ export function writeInstruction(
 ): string {
   const stamp = now.toISOString().slice(0, 19).replace(/:/g, '-')
   const id = `${stamp}-${randomBytes(2).toString('hex')}`
-  const data: Record<string, unknown> = { status: 'queued' }
+  const data: Record<string, unknown> = { v: 1, status: 'queued' }
   if (resolved) {
     data.action = resolved.action
     if (resolved.card) data.card = resolved.card
@@ -58,13 +68,18 @@ export function writeInstruction(
     if (resolved.scope) data.scope = resolved.scope
     if (resolved.via) data.via = resolved.via
   }
+  const errs = validateInstruction(data)
+  if (errs.length) throw new Error(`instruction invalid: ${formatErrors(errs)}`)
   const content = matter.stringify(`\n${text}\n`, data)
-  writeFileSync(join(tasksDir, 'queue', `${id}.md`), content)
+  writeFileAtomic(join(tasksDir, 'queue', `${id}.md`), content)
   return id
 }
 
 export function readInstruction(path: string): Instruction {
   const { data, content } = matter(readFileSync(path, 'utf-8'))
+  const errs = validateInstruction(data)
+  if (errs.length)
+    throw new Error(`${path} invalid against instruction.v1.json: ${formatErrors(errs)}`)
   return {
     id: basename(path, '.md'),
     path,
@@ -86,6 +101,7 @@ export function readInstruction(path: string): Instruction {
     pick: data.pick ?? undefined,
     error: data.error ?? undefined,
     result: data.result ?? undefined,
+    device: data.device ?? undefined,
     raw: content.trim()
   }
 }
@@ -113,14 +129,18 @@ export function patchInstruction(
       | 'with'
       | 'scope'
       | 'result'
+      | 'device'
     >
   >
 ): void {
   const { data, content } = matter(readFileSync(path, 'utf-8'))
-  const merged = { ...data, ...patch }
+  const merged: Record<string, unknown> = { ...data, ...patch }
   // Remove undefined values as js-yaml throws on them
   for (const k of Object.keys(merged)) if (merged[k] === undefined) delete merged[k]
-  writeFileSync(path, matter.stringify(content, merged))
+  merged.v = merged.v ?? 1
+  const errs = validateInstruction(merged)
+  if (errs.length) throw new Error(`instruction patch invalid: ${formatErrors(errs)}`)
+  writeFileAtomic(path, matter.stringify(content, merged))
 }
 
 const LOG_HEADER = '## Log'
@@ -132,6 +152,7 @@ export function writeCard(
 ): string {
   const path = join(tasksDir, 'cards', `${card.shortname}.md`)
   const front = {
+    v: 1,
     title: card.title,
     status: card.status,
     created: card.created,
@@ -139,6 +160,8 @@ export function writeCard(
     links: card.links,
     labels: card.labels
   }
+  const errs = validateCard(front)
+  if (errs.length) throw new Error(`card "${card.shortname}" invalid: ${formatErrors(errs)}`)
   // Sections, in order: description, user notes (omitted when empty), system log.
   // The log is ALWAYS last so appendLog can append a line to EOF and land in it.
   const notes = card.notes ?? []
@@ -146,7 +169,7 @@ export function writeCard(
     ? `${NOTES_HEADER}\n${notes.map((l) => `- ${l}`).join('\n')}\n\n`
     : ''
   const body = `\n${card.description}\n\n${notesBlock}${LOG_HEADER}\n${card.log.map((l) => `- ${l}`).join('\n')}\n`
-  writeFileSync(path, matter.stringify(body, front))
+  writeFileAtomic(path, matter.stringify(body, front))
   return path
 }
 
@@ -159,10 +182,19 @@ function bulletLines(section: string): string[] {
     .map((l) => l.slice(2))
 }
 
+/** Split on a header that occupies a whole line (line-anchored). */
+function splitSection(text: string, header: string): [string, string | undefined] {
+  const m = text.match(new RegExp(`^${header.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm'))
+  if (!m || m.index === undefined) return [text, undefined]
+  return [text.slice(0, m.index), text.slice(m.index + m[0].length)]
+}
+
 export function readCard(path: string): Card {
   const { data, content } = matter(readFileSync(path, 'utf-8'))
-  const [beforeLog, logPart] = content.split(LOG_HEADER)
-  const [desc, notesPart] = beforeLog.split(NOTES_HEADER)
+  const errs = validateCard(data)
+  if (errs.length) throw new Error(`${path} invalid against card.v1.json: ${formatErrors(errs)}`)
+  const [beforeLog, logPart] = splitSection(content, LOG_HEADER)
+  const [desc, notesPart] = splitSection(beforeLog, NOTES_HEADER)
   const notes = bulletLines(notesPart ?? '')
   const log = bulletLines(logPart ?? '')
   return {

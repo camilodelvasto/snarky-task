@@ -445,9 +445,10 @@ body {
 /* ── Open card (declarative — rendered in-flow from state.open) ───────────── */
 
 .card-open {
-  /* In-flow block above the masonry, centered; FLIP animates the move */
-  width: min(640px, calc(100% - 56px));
-  margin: 28px auto 4px;
+  /* In-flow block above the masonry; fills the surface-main width (the rail is a
+     sibling, already excluded). 28px gutters align with the masonry padding below. */
+  width: auto;
+  margin: 28px 28px 4px;
   position: relative;
 }
 

@@ -5,7 +5,7 @@ import { ScreenshotCleaner, SCREENSHOT_DIR } from './screenshot-cleanup'
 import { startServer } from './server'
 import { SurfaceViews } from './views'
 import { ProjectManager } from './project-manager'
-import { resolveRoot } from './tasks/projects'
+import { resolveRoot, resolveDevice } from './tasks/projects'
 
 let mainWindow: BrowserWindow | null = null
 const screenshotCleaner = new ScreenshotCleaner(SCREENSHOT_DIR)
@@ -20,7 +20,12 @@ async function boot(): Promise<void> {
   const late: { views?: SurfaceViews } = {}
 
   const root = resolveRoot(appRoot)
-  const pm = new ProjectManager(root, join(appRoot, 'workspace', 'templates'), () => broadcastFn())
+  const pm = new ProjectManager(
+    root,
+    join(appRoot, 'workspace', 'templates'),
+    resolveDevice(),
+    () => broadcastFn()
+  )
   await pm.boot()
   app.on('will-quit', () => {
     void pm.stop().catch(console.error)

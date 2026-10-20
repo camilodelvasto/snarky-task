@@ -26,6 +26,7 @@ const registry: Registry = {
   rename: { class: 'normal', target: 'required' },
   clean: { class: 'meta' },
   clear: { class: 'meta' },
+  check: { class: 'meta' },
   project: { class: 'meta' },
   project_rm: { class: 'destructive' }
 }
@@ -68,6 +69,7 @@ function setup(
   const onChange = vi.fn()
   const engine = new Engine({
     tasksDir,
+    device: 'this-mac',
     registry,
     config,
     caps,
@@ -235,6 +237,7 @@ describe('Engine.processFile', () => {
     }
     const freshA = new Engine({
       tasksDir: tdA,
+      device: 'this-mac',
       registry,
       config,
       caps: capsA,
@@ -284,6 +287,7 @@ describe('Engine.processFile', () => {
     }
     const freshB = new Engine({
       tasksDir: tdB,
+      device: 'this-mac',
       registry,
       config,
       caps: capsB,
@@ -430,6 +434,7 @@ describe('Engine.processFile', () => {
     }
     const engine = new Engine({
       tasksDir,
+      device: 'this-mac',
       registry,
       config: { ...config, done_ttl_s: 20 },
       caps,
@@ -467,6 +472,55 @@ describe('Engine.processFile', () => {
     // the card itself is untouched
     expect(readCard(join(tasksDir, 'cards', 'target.md')).description).toBe('body')
   })
+  it('check validates the workspace and reports invalids in result', async () => {
+    const { tasksDir, engine } = setup([])
+    // one valid card, one hand-broken card (bad status, written raw to dodge writeCard validation)
+    writeCard(tasksDir, {
+      shortname: 'good',
+      title: 'Good',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    writeFileSync(
+      join(tasksDir, 'cards', 'broken.md'),
+      matter.stringify('\n\n## Log\n', {
+        title: 'Broken',
+        status: 'nope',
+        created: '2026-10-01',
+        links: [],
+        labels: []
+      })
+    )
+    const id = writeInstruction(tasksDir, 'check', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('done')
+    expect(inst.result).toMatch(/1 invalid/)
+    expect(inst.result).toContain('cards/broken.md')
+    expect(inst.result).toContain('status')
+  })
+  it('check on a clean workspace reports all valid and mutates nothing', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'good',
+      title: 'Good',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    const before = readFileSync(join(tasksDir, 'cards', 'good.md'), 'utf-8')
+    const id = writeInstruction(tasksDir, 'check', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).result).toMatch(/all valid/)
+    expect(readFileSync(join(tasksDir, 'cards', 'good.md'), 'utf-8')).toBe(before) // untouched
+  })
   it('clear wipes the scrollback — history and done rows — but never cards', async () => {
     const { tasksDir, engine } = setup([])
     // one swept-to-history row, one fresh done row, one card
@@ -501,6 +555,7 @@ describe('Engine pre-resolved instructions (deterministic surface actions)', () 
     }
     const engine = new Engine({
       tasksDir,
+      device: 'this-mac',
       registry,
       config,
       caps,
@@ -582,6 +637,7 @@ describe('Engine collaborator delegation', () => {
     }
     const engine = new Engine({
       tasksDir,
+      device: 'this-mac',
       registry,
       config: { ...config, collaborators: { claude: { use: 'agent' } } },
       caps,
@@ -622,6 +678,7 @@ describe('Engine collaborator delegation', () => {
     }
     const engine = new Engine({
       tasksDir,
+      device: 'this-mac',
       registry,
       config: { ...config, collaborators: { claude: { use: 'agent' } } },
       caps,
@@ -677,6 +734,7 @@ describe('Engine delegation scope & privacy', () => {
     }
     const engine = new Engine({
       tasksDir,
+      device: 'this-mac',
       registry,
       config: { ...config, collaborators: opts.collaborators },
       caps,
@@ -863,6 +921,54 @@ describe('Engine.createArtifact (author an output by hand)', () => {
   })
 })
 
+describe('Engine device ownership (synced workspaces)', () => {
+  const foreign = (tasksDir: string, name: string, status: string): string => {
+    const p = join(tasksDir, 'queue', `${name}.md`)
+    writeFileSync(p, matter.stringify('\n+ call the plumber\n', { status, device: 'other-mac' }))
+    return p
+  }
+
+  it('claims an unowned instruction (stamps this device) and runs it', async () => {
+    const { tasksDir, engine } = setup([])
+    const id = writeInstruction(tasksDir, '+ write the ngo proposal', new Date())
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.device).toBe('this-mac')
+    expect(inst.status).toBe('done')
+  })
+
+  it('never runs another device’s queued instruction', async () => {
+    const { tasksDir, engine } = setup([])
+    const p = foreign(tasksDir, 'synced-001', 'queued')
+    await engine.processFile(p)
+    expect(readInstruction(p).status).toBe('queued')
+    expect(readInstruction(p).device).toBe('other-mac')
+    expect(readdirSync(join(tasksDir, 'cards'))).toHaveLength(0)
+  })
+
+  it('boot leaves another device’s working/needs_confirmation rows alone', async () => {
+    const { tasksDir, engine } = setup([])
+    const working = foreign(tasksDir, 'synced-002', 'working')
+    const confirm = foreign(tasksDir, 'synced-003', 'needs_confirmation')
+    engine.start()
+    await engine.drain()
+    await engine.stop()
+    expect(readInstruction(working).status).toBe('working')
+    expect(readInstruction(confirm).status).toBe('needs_confirmation')
+    expect(readdirSync(join(tasksDir, 'cards'))).toHaveLength(0)
+  })
+
+  it('requeue from this machine takes ownership and runs here', async () => {
+    const { tasksDir, engine } = setup([])
+    foreign(tasksDir, 'synced-004', 'attention')
+    engine.requeue('synced-004')
+    await engine.drain()
+    const inst = readInstruction(qpath(tasksDir, 'synced-004'))
+    expect(inst.device).toBe('this-mac')
+    expect(inst.status).toBe('done')
+  })
+})
+
 describe('Engine card reconciliation (direct edits are ops)', () => {
   it('logs status and description changes from a direct edit, exactly once', () => {
     const { tasksDir, engine } = setup([])
@@ -915,6 +1021,33 @@ describe('Engine card reconciliation (direct edits are ops)', () => {
     eng.reconcileCard(p) // watcher fires after the engine write — diff must be clean
     expect(readCard(p).log.filter((l: string) => l.includes('direct edit'))).toHaveLength(0)
     expect(readCard(p).status).toBe('active')
+  })
+
+  it('absorbs a synced change that arrives already logged by the other device', () => {
+    const { tasksDir, engine } = setup([])
+    const base = {
+      shortname: 'proto',
+      title: 'Prototype',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: 'd'
+    }
+    writeCard(tasksDir, { ...base, status: 'inbox', log: ['2026-10-01 09:00 — created'] })
+    const p = join(tasksDir, 'cards', 'proto.md')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const eng = engine as any
+    eng.refreshCardFacts()
+
+    // the other device's engine moved it and logged the op; sync delivers the whole file
+    writeCard(tasksDir, {
+      ...base,
+      status: 'active',
+      log: ['2026-10-01 09:00 — created', '2026-10-02 10:00 — status → active ("move #proto")']
+    })
+    eng.reconcileCard(p)
+    expect(readCard(p).log.filter((l: string) => l.includes('direct edit'))).toHaveLength(0)
+    expect(readCard(p).log).toHaveLength(2)
   })
 })
 
@@ -985,6 +1118,7 @@ describe('Engine CLI layer', () => {
     })
     const engine = new Engine({
       tasksDir,
+      device: 'this-mac',
       registry,
       config,
       caps,
@@ -1142,6 +1276,7 @@ describe('Engine delegate open-target (policy: create)', () => {
     }
     const engine = new Engine({
       tasksDir,
+      device: 'this-mac',
       registry: {
         ...registry,
         create: { class: 'normal', target: 'none' },

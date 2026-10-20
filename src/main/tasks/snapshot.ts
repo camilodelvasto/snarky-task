@@ -5,6 +5,9 @@ import type { Snapshot, Instruction, Card } from './types'
 
 function collect<T>(dir: string, read: (p: string) => T): T[] {
   const out: T[] = []
+  // A synced workspace may be missing an empty subdir (Syncthing drops empties);
+  // a read must never crash the snapshot/broadcast — treat absent as empty.
+  if (!existsSync(dir)) return out
   for (const name of readdirSync(dir)
     .filter((n) => n.endsWith('.md'))
     .sort()) {

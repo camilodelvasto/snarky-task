@@ -1,16 +1,17 @@
 // src/main/tasks/engine.ts
 import { watch, FSWatcher } from 'chokidar'
-import {
-  readdirSync,
-  rmSync,
-  existsSync,
-  mkdirSync,
-  writeFileSync,
-  renameSync,
-  readFileSync
-} from 'fs'
+import { readdirSync, rmSync, existsSync, mkdirSync, renameSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { readInstruction, patchInstruction, writeInstruction, appendLog, readCard } from './files'
+import matter from 'gray-matter'
+import {
+  readInstruction,
+  patchInstruction,
+  writeInstruction,
+  appendLog,
+  readCard,
+  writeFileAtomic
+} from './files'
+import { validateCard, validateInstruction, formatErrors } from './validate'
 import { readSnapshot } from './snapshot'
 import { prepass } from './prepass'
 import { diffCard, type CardFacts } from './reconcile'
@@ -28,6 +29,7 @@ import {
 import { parseCommand } from './cli'
 import { buildDelegationContext } from './context'
 import type {
+  Instruction,
   Registry,
   TaskdeckConfig,
   CardStatus,
@@ -49,6 +51,7 @@ type ExecuteOpts = {
 
 export interface EngineDeps {
   tasksDir: string
+  device: string // this machine's id — see claim()
   registry: Registry
   config: TaskdeckConfig
   caps: Capabilities
@@ -104,6 +107,7 @@ export class Engine {
       const p = join(this.queueDir(), f)
       try {
         const inst = readInstruction(p)
+        if (!this.claim(p, inst)) continue
         if (inst.status === 'working') {
           patchInstruction(p, { status: 'queued' })
         } else if (inst.status === 'attention') {
@@ -150,11 +154,13 @@ export class Engine {
       this.deps.onChange()
     })
     this.watchers = [q, c]
-    // Pre-existing done rows start their TTL at boot.
+    // This device's pre-existing done rows start their TTL at boot.
     for (const f of readdirSync(this.queueDir()).filter((n) => n.endsWith('.md'))) {
       const p = join(this.queueDir(), f)
       try {
-        if (readInstruction(p).status === 'done') this.doneAt.set(p, this.now().getTime())
+        const inst = readInstruction(p)
+        if (inst.status === 'done' && inst.device === this.deps.device)
+          this.doneAt.set(p, this.now().getTime())
       } catch {
         /* skip */
       }
@@ -171,7 +177,12 @@ export class Engine {
       const p = join(dir, f)
       try {
         const c = readCard(p)
-        this.cardFacts.set(p, { status: c.status, description: c.description, title: c.title })
+        this.cardFacts.set(p, {
+          status: c.status,
+          description: c.description,
+          title: c.title,
+          log: c.log
+        })
       } catch {
         /* half-written; watcher fires again on save */
       }
@@ -187,7 +198,12 @@ export class Engine {
     } catch {
       return // half-written hand edit; watcher fires again on save
     }
-    const next = { status: card.status, description: card.description, title: card.title }
+    const next = {
+      status: card.status,
+      description: card.description,
+      title: card.title,
+      log: card.log
+    }
     const changes = diffCard(this.cardFacts.get(path), next)
     this.cardFacts.set(path, next)
     const stamp = this.now().toISOString().slice(0, 16).replace('T', ' ')
@@ -225,6 +241,7 @@ export class Engine {
     } catch {
       return // half-written hand edit; watcher fires again on save
     }
+    if (!this.claim(path, inst)) return
     if (inst.status !== 'queued') return
     this.inflight.add(path)
     try {
@@ -232,6 +249,18 @@ export class Engine {
     } finally {
       this.inflight.delete(path)
     }
+  }
+
+  /** In a synced workspace another machine's instructions arrive as files: they show in
+   *  the feed but only their owner runs, recovers or sweeps them. An instruction without a
+   *  device (fresh API write, hand-written file, pre-sync data) belongs to the first engine
+   *  that sees it — milliseconds after the write, well before any sync tool ships it. */
+  private claim(path: string, inst: Instruction): boolean {
+    if (inst.device === undefined) {
+      patchInstruction(path, { device: this.deps.device })
+      return true
+    }
+    return inst.device === this.deps.device
   }
 
   private setStatus(path: string, patch: Parameters<typeof patchInstruction>[1]): void {
@@ -341,6 +370,37 @@ export class Engine {
       }
       rmSync(path)
       this.deps.onChange()
+      return
+    }
+    if (pre.meta === 'check') {
+      const dirs: Array<[string, (fm: unknown) => ReturnType<typeof validateCard>]> = [
+        ['cards', validateCard],
+        ['queue', validateInstruction],
+        ['history', validateInstruction]
+      ]
+      let total = 0
+      const bad: string[] = []
+      for (const [sub, check] of dirs) {
+        const d = join(tasksDir, sub)
+        if (!existsSync(d)) continue
+        for (const f of readdirSync(d).filter((n) => n.endsWith('.md'))) {
+          if (sub === 'queue' && join(d, f) === path) continue // skip this instruction itself
+          total++
+          try {
+            const { data } = matter(readFileSync(join(d, f), 'utf-8'))
+            const errs = check(data)
+            if (errs.length) bad.push(`${sub}/${f}: ${formatErrors(errs)}`)
+          } catch (err) {
+            bad.push(
+              `${sub}/${f}: unreadable (${err instanceof Error ? err.message : String(err)})`
+            )
+          }
+        }
+      }
+      const result = bad.length
+        ? `checked ${total} files — ${bad.length} invalid\n${bad.join('\n')}`
+        : `checked ${total} files — all valid`
+      this.setStatus(path, { status: 'done', via: 'cli', result, ...this.telemetry(path, 'cli') })
       return
     }
 
@@ -699,7 +759,7 @@ export class Engine {
     const dir = join(this.deps.tasksDir, 'artifacts', card)
     mkdirSync(dir, { recursive: true })
     const file = `${now.toISOString().slice(0, 16).replace(/:/g, '-')}.md`
-    writeFileSync(join(dir, file), output)
+    writeFileAtomic(join(dir, file), output)
     appendLog(
       join(this.deps.tasksDir, 'cards', `${card}.md`),
       `${now.toISOString().slice(0, 16).replace('T', ' ')} — delegated (${label}) → artifacts/${card}/${file}`
@@ -720,7 +780,7 @@ export class Engine {
     let file = `${stamp}.md`
     let n = 1
     while (existsSync(join(dir, file))) file = `${stamp}-${n++}.md`
-    writeFileSync(join(dir, file), '')
+    writeFileAtomic(join(dir, file), '')
     appendLog(
       cardPath,
       `${now.toISOString().slice(0, 16).replace('T', ' ')} — output added by hand → artifacts/${card}/${file}`
@@ -864,8 +924,10 @@ export class Engine {
     } else {
       // Requeue means start over: wipe any stale resolution from a failed attempt so the
       // instruction re-resolves instead of replaying the old action as pre-resolved.
+      // Requeuing from this machine takes ownership — it runs here, whoever wrote it.
       this.setStatus(path, {
         status: 'queued',
+        device: this.deps.device,
         error: undefined,
         action: undefined,
         card: undefined,

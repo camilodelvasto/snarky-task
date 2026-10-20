@@ -202,7 +202,9 @@ function render(snapshot) {
   const histRows = histOpen ? histData.map(rowHtml).join('') : ''
   done.innerHTML =
     `<div class="done-head">${histToggle}${
-      finished.length ? ` · ${finished.length} done — "clean" sweeps to history, "clear" wipes` : ''
+      finished.length
+        ? ` · ${finished.length} done — "clean" sweeps to history, "clear" wipes, "check" validates`
+        : ''
     }</div>` +
     histRows +
     (finished.length ? finished.map(rowHtml).join('') : '')
@@ -380,7 +382,8 @@ const AC_VERBS = [
   { insert: 'project ', label: '/project', hint: 'switch/new/rm — decks per concern' },
   { insert: 'projects', label: '/projects', hint: 'list projects' },
   { insert: 'clean', label: '/clean', hint: 'sweep done rows into history' },
-  { insert: 'clear', label: '/clear', hint: 'wipe history and done rows' }
+  { insert: 'clear', label: '/clear', hint: 'wipe history and done rows' },
+  { insert: 'check', label: '/check', hint: 'validate every card & instruction' }
 ]
 
 // Static status list.

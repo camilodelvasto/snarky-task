@@ -7,7 +7,8 @@ import {
   writeFileSync,
   copyFileSync
 } from 'fs'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
+import { randomBytes } from 'crypto'
 import { join } from 'path'
 import { readCard, writeCard } from './files'
 
@@ -34,10 +35,46 @@ export function resolveRoot(
   }
   return join(appRoot, 'workspace')
 }
+/**
+ * This machine's device id: first line of ~/.config/snarky-task/device. Lives outside
+ * the workspace so a synced workspace never carries it. Written once on first boot as
+ * `<hostname>-<4 hex>`; rename it by editing the file (before any instruction is stamped).
+ */
+export function resolveDevice(
+  cfgPath: string = join(homedir(), '.config', 'snarky-task', 'device')
+): string {
+  if (existsSync(cfgPath)) {
+    const id = readFileSync(cfgPath, 'utf-8').split('\n')[0].trim()
+    if (!id) throw new Error(`resolveDevice: ${cfgPath} is empty`)
+    return id
+  }
+  const host = hostname()
+    .toLowerCase()
+    .replace(/\.local$/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  if (!host)
+    throw new Error(
+      `resolveDevice: hostname "${hostname()}" yields no id — write ${cfgPath} by hand`
+    )
+  const id = `${host}-${randomBytes(2).toString('hex')}`
+  mkdirSync(join(cfgPath, '..'), { recursive: true })
+  writeFileSync(cfgPath, `${id}\n`)
+  return id
+}
+
 const stamp = (d: Date): string => d.toISOString().slice(0, 16).replace('T', ' ')
 
 export const projectTasksDir = (root: string, name: string): string =>
   join(root, 'projects', name, 'tasks')
+
+/** The four subdirectories every project's tasks dir must have. Syncthing does
+ *  NOT sync empty directories, so a project authored on one machine arrives on
+ *  another missing its empty queue/history/artifacts — recreate them locally. */
+export function ensureProjectDirs(tasksDir: string): void {
+  for (const s of ['queue', 'cards', 'history', 'artifacts'])
+    mkdirSync(join(tasksDir, s), { recursive: true })
+}
 
 export function migrateWorkspace(root: string): boolean {
   const legacy = join(root, 'tasks')

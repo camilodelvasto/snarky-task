@@ -13,6 +13,7 @@ import {
   currentProject,
   writeCurrent,
   projectTasksDir,
+  ensureProjectDirs,
   createProject,
   trashProject
 } from './tasks/projects'
@@ -27,6 +28,7 @@ export class ProjectManager implements ProjectOps {
   constructor(
     private root: string,
     private appTemplatesDir: string,
+    private device: string,
     onChange: () => void
   ) {
     this.onChange = onChange
@@ -60,11 +62,15 @@ export class ProjectManager implements ProjectOps {
 
   private async bind(name: string): Promise<void> {
     const tasksDir = projectTasksDir(this.root, name)
+    // A synced project may arrive missing its empty subdirs (Syncthing) — recreate
+    // them locally before the engine reads/writes the queue, cards, history, artifacts.
+    ensureProjectDirs(tasksDir)
     const config = loadConfig(tasksDir) // throws → caller parks the switch; old engine still running
     const { registry, aliases } = loadRegistry(tasksDir)
     const caps = bindCapabilities(config)
     const next = new Engine({
       tasksDir,
+      device: this.device,
       registry,
       config,
       caps,

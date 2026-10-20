@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "instruction.v1.json",
+  "title": "snarky-task Instruction (frontmatter)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "status": { "type": "string", "enum": ["queued", "working", "needs_confirmation", "attention", "done"] },
+    "action": { "type": "string" },
+    "card": { "type": "string" },
+    "to": { "type": "string" },
+    "title": { "type": "string" },
+    "desc": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "due": { "type": "string" },
+    "with": { "type": "string" },
+    "scope": { "type": "string", "enum": ["card", "full", "board"] },
+    "via": { "type": "string", "enum": ["cli", "ai", "cli+ai"] },
+    "engine": { "type": "string" },
+    "model": { "type": "string" },
+    "version": { "type": "string" },
+    "ms": { "type": "number" },
+    "pick": { "type": "number" },
+    "error": { "type": "string" },
+    "result": { "type": "string" },
+    "device": { "type": "string" }
+  }
+}

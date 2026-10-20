@@ -42,7 +42,11 @@ export async function handleCreate(
   // Capture is deterministic — no model on this path, ever. The first line IS
   // the title (sigil tokens stripped, sanitized to one short line); continuation
   // lines are the description. A thought becomes a card instantly and offline.
-  const taken = new Set(readdirSync(join(ctx.tasksDir, 'cards')).map((f) => f.replace(/\.md$/, '')))
+  const taken = new Set(
+    readdirSync(join(ctx.tasksDir, 'cards'))
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => f.replace(/\.md$/, ''))
+  )
   const lines = pre.cleaned
     .split('\n')
     .map((l) => l.trim())
@@ -153,7 +157,11 @@ export function handleRename(ctx: HandlerCtx, card: string, newTitle: string): s
   const path = cardPath(ctx, card) // throws if the card is missing
   const old = readCard(path)
 
-  const taken = new Set(readdirSync(join(ctx.tasksDir, 'cards')).map((f) => f.replace(/\.md$/, '')))
+  const taken = new Set(
+    readdirSync(join(ctx.tasksDir, 'cards'))
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => f.replace(/\.md$/, ''))
+  )
   taken.delete(card) // the old slug is free to reuse if the title maps back to it
   const slug = slugify(title, taken)
 

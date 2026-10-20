@@ -26,6 +26,7 @@ export interface Instruction {
   scope?: Scope // delegation context breadth — persisted so replay reproduces it
   error?: string
   result?: string // listing/confirmation output shown in the drawer (e.g. project list)
+  device?: string // owning machine — only its engine runs this instruction (synced workspaces)
   raw: string
 }
 

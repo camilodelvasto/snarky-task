@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   resolveRoot,
+  resolveDevice,
   migrateWorkspace,
   listProjects,
   listTemplates,
@@ -12,7 +13,8 @@ import {
   projectTasksDir,
   createProject,
   trashProject,
-  ensureDefaultProject
+  ensureDefaultProject,
+  ensureProjectDirs
 } from '../tasks/projects'
 import { writeCard, readCard } from '../tasks/files'
 
@@ -139,6 +141,16 @@ describe('projects fs library', () => {
   })
 })
 
+describe('ensureProjectDirs', () => {
+  it('creates the four task subdirs (recovering Syncthing-dropped empties)', () => {
+    const tasks = join(mkdtempSync(join(tmpdir(), 'td-')), 'proj', 'tasks')
+    mkdirSync(tasks, { recursive: true }) // tasks dir exists (synced files) but no subdirs
+    ensureProjectDirs(tasks)
+    for (const s of ['queue', 'cards', 'history', 'artifacts'])
+      expect(existsSync(join(tasks, s))).toBe(true)
+  })
+})
+
 describe('ensureDefaultProject', () => {
   it('backfills missing config.json from templates/default when projects/default/tasks exists without it', () => {
     const r = root()
@@ -195,6 +207,28 @@ describe('ensureDefaultProject', () => {
     ensureDefaultProject(r)
     for (const s of ['queue', 'cards', 'history', 'artifacts'])
       expect(existsSync(join(tasks, s))).toBe(true)
+  })
+})
+
+describe('resolveDevice', () => {
+  it('writes <host>-<hex> on first boot and returns the same id after', () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), 'dev-')), 'snarky-task', 'device')
+    const id = resolveDevice(cfg)
+    expect(id).toMatch(/^[a-z0-9-]+-[0-9a-f]{4}$/)
+    expect(readFileSync(cfg, 'utf-8').trim()).toBe(id)
+    expect(resolveDevice(cfg)).toBe(id)
+  })
+
+  it('reads a hand-written id', () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), 'dev-')), 'device')
+    writeFileSync(cfg, 'camilo-mbp\n')
+    expect(resolveDevice(cfg)).toBe('camilo-mbp')
+  })
+
+  it('throws on an empty file', () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), 'dev-')), 'device')
+    writeFileSync(cfg, '\n')
+    expect(() => resolveDevice(cfg)).toThrow(/is empty/)
   })
 })
 
