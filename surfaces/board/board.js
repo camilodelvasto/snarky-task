@@ -23,7 +23,8 @@ export const state = {
   focusIdx: 0,
   open: null, // shortname of the expanded card, or null
   editTitle: false,
-  openCard: null // legacy alias kept for keyboard.js reads; mirrors `open`
+  openCard: null, // legacy alias kept for keyboard.js reads; mirrors `open`
+  projectMenu: false
 }
 
 let renderQueued = false
@@ -106,18 +107,14 @@ export function deleteCard(card) {
 }
 
 // ── Open / close (the only two verbs the editor needs from the store) ─────────
-export function openCard(card, { editTitle = false } = {}) {
-  if (state.mode === 'archive') return
-  patch({ open: card.shortname, editTitle })
-}
-
-/** Close the open card; optionally save changed fields through the door. */
-export function closeOpen({ save = true } = {}) {
+/** Persist the open card's edited title/description through the door, then blur
+ *  so the typing guard can't defer the next render. Shared by every exit path
+ *  (close to board, or switch straight to another card). */
+function persistOpenEdits() {
   if (!state.open) return
   const container = root.querySelector('[data-open-card]')
   const card = state.snapshot.cards.find((c) => c.shortname === state.open)
-
-  if (save && container && card) {
+  if (container && card) {
     const titleEl = container.querySelector('[data-field="title"]')
     const descEl = container.querySelector('[data-field="description"]')
     const newTitle = (titleEl?.textContent ?? card.title).trim()
@@ -138,11 +135,24 @@ export function closeOpen({ save = true } = {}) {
       )
     }
   }
-
-  // Blur BEFORE patching so the typing guard can never defer this render.
   if (document.activeElement && container?.contains(document.activeElement)) {
     document.activeElement.blur()
   }
+}
+
+/** Open a card. This is the ONE route change — `state.open` is the source of
+ *  truth, and switching from an already-open card saves its edits first, so a
+ *  single declarative patch exits the old card clean and grows the new one. */
+export function openCard(card, { editTitle = false } = {}) {
+  if (state.mode === 'archive') return
+  if (state.open && state.open !== card.shortname) persistOpenEdits()
+  patch({ open: card.shortname, editTitle })
+}
+
+/** Close the open card back to the board, saving its edits through the door. */
+export function closeOpen({ save = true } = {}) {
+  if (!state.open) return
+  if (save) persistOpenEdits()
   const closedShortname = state.open
   patch({ open: null, editTitle: false })
   flushRender()
@@ -168,6 +178,11 @@ function accentLabels() {
   return state.snapshot.ui?.accent_labels ?? undefined
 }
 
+/** The label that keeps a card off external agents — config.json ui.private_label. */
+function privateLabel() {
+  return state.snapshot.ui?.private_label ?? 'private'
+}
+
 // ── Zones ─────────────────────────────────────────────────────────────────────
 function zones(cards) {
   return {
@@ -188,8 +203,24 @@ export function els() {
 const TABS = ['surface', 'columns', 'list', 'archive']
 
 function renderTopbar() {
+  const proj = state.snapshot.project
+  const chip = proj
+    ? `<div class="proj-wrap"><button class="proj-chip" data-proj-toggle>${esc(proj.current)} ▾</button>` +
+      (state.projectMenu
+        ? `<div class="proj-menu">` +
+          proj.list
+            .map(
+              (n) =>
+                `<button class="proj-item${n === proj.current ? ' on' : ''}" data-proj="${esc(n)}">${esc(n)}</button>`
+            )
+            .join('') +
+          `</div>`
+        : '') +
+      `</div>`
+    : ''
   return (
     `<nav class="topbar" aria-label="View modes">` +
+    chip +
     TABS.map(
       (t) =>
         `<button class="tab${state.mode === t ? ' active' : ''}" data-mode="${esc(t)}">${esc(t)}</button>`
@@ -220,6 +251,7 @@ function renderSurface(z) {
         status: displayStatus(openCardObj),
         highlightLabels: highlightLabels(),
         accents: accentLabels(),
+        privateLabel: privateLabel(),
         busy: busySet().has(openCardObj.shortname)
       })
     : ''
@@ -231,7 +263,8 @@ function renderSurface(z) {
         zone: 'surface',
         status: displayStatus(c),
         highlightLabels: highlightLabels(),
-        accents: accentLabels()
+        accents: accentLabels(),
+        privateLabel: privateLabel()
       })
     )
     .join('')
@@ -277,6 +310,7 @@ function renderColumns() {
             pending: isPending(c),
             highlightLabels: highlightLabels(),
             accents: accentLabels(),
+            privateLabel: privateLabel(),
             busy: busySet().has(c.shortname)
           })
         )
@@ -326,6 +360,7 @@ function renderList() {
         status: displayStatus(openCardObj),
         highlightLabels: highlightLabels(),
         accents: accentLabels(),
+        privateLabel: privateLabel(),
         busy: busySet().has(openCardObj.shortname)
       })
     : ''
@@ -487,6 +522,26 @@ function render() {
 
 // ── Delegated clicks (declarative handlers — one listener, state decides) ─────
 root.addEventListener('click', (e) => {
+  // Project chip toggle — opens/closes the project dropdown
+  if (e.target.closest('[data-proj-toggle]')) {
+    patch({ projectMenu: !state.projectMenu })
+    return
+  }
+
+  // Project item — emit bare text instruction (CLI-parsed); close menu
+  const projItem = e.target.closest('[data-proj]')
+  if (projItem) {
+    const name = projItem.dataset.proj
+    void emitInstruction(`project ${name}`)
+    patch({ projectMenu: false })
+    return
+  }
+
+  // Any other click closes the project menu (avoid wasted renders when already closed)
+  if (state.projectMenu) {
+    patch({ projectMenu: false })
+  }
+
   const tab = e.target.closest('.tab')
   if (tab) {
     closeOpen()
@@ -507,31 +562,23 @@ root.addEventListener('click', (e) => {
   // Clicks inside the open card are handled by its own wiring
   if (e.target.closest('[data-open-card]')) return
 
-  // Click anywhere outside the open card closes it (no save); if the click hit
-  // another card, focus lands there after the render.
-  if (state.open) {
-    const clicked = e.target.closest('[data-card]')?.dataset.card ?? null
-    closeOpen()
-    if (clicked) requestAnimationFrame(() => restoreFocus(clicked, true))
+  const cardEl = e.target.closest('[data-card]')
+  const clicked = cardEl?.dataset.card ?? null
+
+  // A card click is a route change: open that card. openCard() saves and exits
+  // any already-open card first, so clicking straight from one card to another
+  // transitions cleanly in a single declarative patch — no close-then-reclick.
+  if (clicked) {
+    const card = state.snapshot.cards.find((c) => c.shortname === clicked)
+    if (!card) return
+    const idx = Array.from(els()).indexOf(cardEl)
+    if (idx !== -1) state.focusIdx = idx
+    openCard(card)
     return
   }
 
-  const cardEl = e.target.closest('[data-card]')
-  if (!cardEl) return
-  const shortname = cardEl.dataset.card
-  const card = state.snapshot.cards.find((c) => c.shortname === shortname)
-  if (!card) return
-
-  const list = Array.from(els())
-  const idx = list.indexOf(cardEl)
-  if (idx === -1) return
-
-  if (state.focusIdx === idx && document.activeElement === cardEl) {
-    openCard(card)
-  } else {
-    state.focusIdx = idx
-    cardEl.focus()
-  }
+  // Clicked empty space with a card open → close back to the board.
+  if (state.open) closeOpen()
 })
 
 // ── Drag-drop (columns mode) ──────────────────────────────────────────────────
@@ -574,11 +621,32 @@ root.addEventListener('drop', (e) => {
 })
 
 // ── SSE + bootstrap ───────────────────────────────────────────────────────────
+// Transient `open #card` nav from the feed: act once per new seq. The FIRST
+// snapshot sets the baseline (seq present at load, or 0) so a reload never
+// re-opens a stale request — but a nav that ARRIVES after load always acts,
+// even if it's the first one ever (baseline would otherwise swallow it).
+let navReady = false
+let lastNavSeq = 0
+function applyNav(snap) {
+  if (!navReady) {
+    navReady = true
+    lastNavSeq = snap.nav?.seq ?? 0
+    return
+  }
+  const nav = snap.nav
+  if (nav && nav.seq > lastNavSeq) {
+    lastNavSeq = nav.seq
+    const card = snap.cards.find((c) => c.shortname === nav.card)
+    if (card) openCard(card)
+  }
+}
+
 const events = new EventSource('/api/events')
 events.onmessage = (e) => {
   const focused = els()[state.focusIdx]
   const focusedShortname = focused?.dataset?.card ?? null
   state.snapshot = JSON.parse(e.data)
+  applyNav(state.snapshot)
   scheduleRender()
   requestAnimationFrame(() => {
     const activeOnBoard = document.activeElement?.closest('[data-card]') != null
@@ -590,6 +658,7 @@ fetch('/api/state')
   .then((r) => r.json())
   .then((s) => {
     state.snapshot = s
+    applyNav(s)
     scheduleRender()
   })
 

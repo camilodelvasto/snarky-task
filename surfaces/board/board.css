@@ -53,6 +53,53 @@ body {
   border-bottom-color: var(--accent);
 }
 
+/* ── Project switcher chip ────────────────────────────────────────────────── */
+.proj-wrap {
+  position: relative;
+  margin-right: 12px;
+}
+
+.proj-chip {
+  background: none;
+  border: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  font: var(--mono);
+  letter-spacing: 0.05em;
+  padding: 0 12px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  transition: color var(--dur) var(--ease);
+}
+.proj-chip:hover { color: var(--ink); }
+
+.proj-menu {
+  position: absolute;
+  top: 34px;
+  left: 8px;
+  background: var(--card);
+  border: var(--border-float);
+  box-shadow: var(--shadow-float);
+  border-radius: var(--radius);
+  padding: 4px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+}
+
+.proj-item {
+  text-align: left;
+  padding: 5px 10px;
+  font: var(--mono);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--ink-2);
+}
+.proj-item:hover { color: var(--ink); background: rgba(15, 15, 12, 0.04); }
+.proj-item.on { color: var(--accent); }
+
 /* ── Surface layout (masonry + rail) ─────────────────────────────────────── */
 .surface-layout {
   display: flex;
@@ -125,6 +172,19 @@ body {
   inset: auto 0 0 0;
   height: 2px;
   background: var(--edge-grad);
+}
+
+/* Private cards — a slate left edge marks what never leaves for an agent. */
+.card.post.private::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--private);
+}
+.card.note.private {
+  border-left: 2px solid var(--private);
+  padding-left: 8px;
 }
 
 /* ── Urgent / important cards ─────────────────────────────────────────────── */
@@ -396,9 +456,24 @@ body {
   border: var(--border-float);
   box-shadow: var(--shadow-float);
   border-radius: var(--radius);
-  padding: 22px 28px 18px 24px;
+  padding: 0; /* header and body own their padding so the header gradient spans edge-to-edge */
   outline: none;
-  overflow: hidden; /* clips the highlight edge to the radius */
+  overflow: hidden; /* clips the header gradient to the radius */
+}
+
+/* Header band — carries the gradient (urgent/important) or sits flush on paper */
+.editor-header {
+  position: relative;
+  padding: 20px 26px 16px 24px;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+/* Without a gradient the header has no visual edge, so a tall header↔body gap
+   reads as dead space — pull the description up tight under the title. */
+.editor-card:not(.urgent) .editor-header {
+  padding-bottom: 2px;
+}
+.editor-body {
+  padding: 6px 26px 16px 24px;
 }
 
 /* The × close — top right, quiet until hovered */
@@ -420,11 +495,15 @@ body {
 .editor-card.urgent .x-close { color: rgba(255, 255, 255, 0.6); }
 .editor-card.urgent .x-close:hover { color: #fff; }
 
-/* Urgent open cards keep gradient + white text */
+/* Urgent/important open cards: the colored shadow stays, but the gradient is
+   confined to the header (see the .editor-header rules below) — the card body
+   is paper, not a full slab of color. */
 .editor-card.urgent {
   border: none;
   box-shadow: var(--shadow-urgent);
-  color: #fff;
+}
+.editor-card.urgent.grad-violet {
+  box-shadow: var(--shadow-important);
 }
 
 /* ── Title field ─────────────────────────────────────────────────────────── */
@@ -451,24 +530,33 @@ body {
 
 /* ── Description field ───────────────────────────────────────────────────── */
 .editor-desc-wrap {
-  margin-top: 8px;
+  margin: 0 0 14px;
+}
+/* The description lives on the paper body — never white, even on urgent cards
+   (the .card.urgent .t-body rule would otherwise make it white-on-white). */
+.editor-card.urgent .editor-desc {
+  color: var(--ink);
 }
 
 .editor-desc {
-  color: var(--ink-2);
+  color: var(--ink);
+  font: 400 15px/1.7 lato, sans-serif;
   outline: none;
-  border-radius: 3px;
-  padding: 2px 4px;
-  margin: -2px -4px;
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin: 0 -10px;
   border: 1px solid transparent;
   caret-color: var(--accent);
   white-space: pre-wrap;
   word-break: break-word;
-  min-height: 1.5em;
+  min-height: 3em;
+  cursor: text;
+  transition: box-shadow var(--dur) var(--ease);
 }
+.editor-desc:hover { box-shadow: inset 0 0 0 1px var(--hairline); }
 
 .editor-desc:empty::before {
-  content: 'add context…';
+  content: 'Write a description or body text…';
   color: var(--ink-4);
   pointer-events: none;
 }
@@ -500,6 +588,20 @@ body {
 
 .editor-log-line {
   color: var(--ink-2);
+}
+
+/* User notes — card content, firmer than the system activity log */
+.editor-notes {
+  margin: 10px 0 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.editor-note-line {
+  font: 400 14px/1.6 lato, sans-serif;
+  color: var(--ink);
+  padding-left: 11px;
+  border-left: 2px solid var(--hairline);
 }
 
 .editor-more-btn {
@@ -552,21 +654,88 @@ body {
 /* Artifact content — the delegation output, readable in place */
 .editor-artifact-row { background: none; border: none; cursor: pointer; text-align: left; padding: 2px 0; }
 .editor-artifact-row:hover { color: var(--ink); }
-.artifact-body {
-  font: 400 12.5px/1.6 lato, sans-serif;
-  color: var(--ink-2);
-  background: var(--paper);
-  border: var(--border-field);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  margin: 6px 0 10px;
-  white-space: pre-wrap;
+/* Rendered markdown — the delegation output reads as a document on the card,
+   not a nested grey panel: no box, no border, ink on white. Click to edit. */
+.artifact-md {
+  font: 400 15px/1.72 lato, sans-serif;
+  color: var(--ink);
+  padding: 2px 2px 14px;
+  margin: 2px 0 12px;
   word-break: break-word;
-  max-height: 360px;
-  overflow-y: auto;
   user-select: text;
+  cursor: text;
+  /* scrolls internally; a thin rule divides the output from the log below */
+  min-height: 2.4em; /* an empty output still has a clickable surface */
+  max-height: 420px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--hairline);
 }
-.editor-card.urgent .artifact-body { background: rgba(255,255,255,.1); color: #fff; border-color: rgba(255,255,255,.25); }
+/* empty output: a clear write-here prompt (clicking enters edit) */
+.artifact-md:empty::before {
+  content: 'Click to write markdown…';
+  color: var(--ink-4);
+  pointer-events: none;
+}
+.artifact-md.editing {
+  white-space: pre-wrap;
+  font: 13.5px/1.7 Menlo, Monaco, monospace;
+  color: var(--ink);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
+  border-bottom: none;
+  border-radius: var(--radius);
+  background: var(--paper);
+  padding: 12px 14px;
+  cursor: auto;
+}
+
+/* Save / Cancel bar — only while editing an artifact */
+.artifact-edit-bar {
+  display: flex;
+  gap: 8px;
+  margin: -4px 0 14px;
+}
+.artifact-save,
+.artifact-cancel {
+  font: var(--mono);
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 4px 14px;
+  border: 1px solid transparent;
+}
+.artifact-save {
+  background: var(--accent);
+  color: #fff;
+}
+.artifact-save:hover {
+  filter: brightness(1.06);
+}
+.artifact-cancel {
+  background: none;
+  color: var(--ink-2);
+  border-color: var(--hairline);
+}
+.artifact-cancel:hover {
+  color: var(--ink);
+  border-color: var(--ink-4);
+}
+.artifact-md .md-h1 { font: 640 22px/1.25 garamond, serif; color: var(--ink); margin: 16px 0 7px; }
+.artifact-md .md-h2 { font: 640 18.5px/1.3 garamond, serif; color: var(--ink); margin: 13px 0 6px; }
+.artifact-md .md-h3, .artifact-md .md-h4 { font: 640 16px/1.35 garamond, serif; color: var(--ink); margin: 11px 0 4px; }
+.artifact-md > .md-h1:first-child, .artifact-md > .md-h2:first-child { margin-top: 0; }
+.artifact-md p { margin: 8px 0; }
+.artifact-md strong { color: var(--ink); font-weight: 600; }
+.artifact-md code { font: 13px/1.5 Menlo, Monaco, monospace; background: rgba(15, 15, 12, 0.055); padding: 1px 4px; border-radius: 3px; }
+.artifact-md .md-pre { font: 12.5px/1.55 Menlo, Monaco, monospace; background: rgba(15, 15, 12, 0.045); padding: 11px 13px; border-radius: var(--radius); overflow-x: auto; margin: 9px 0; white-space: pre; }
+.artifact-md ul, .artifact-md ol { margin: 8px 0; padding-left: 22px; }
+.artifact-md li { margin: 4px 0; }
+.artifact-md table { border-collapse: collapse; margin: 11px 0; width: 100%; }
+.artifact-md th { text-align: left; font-weight: 600; color: var(--ink); }
+.artifact-md th, .artifact-md td { border-bottom: 1px solid var(--hairline); padding: 6px 9px 6px 0; }
+.artifact-md blockquote { border-left: 2px solid var(--accent); padding-left: 11px; color: var(--ink-3); margin: 9px 0; }
+.artifact-md .md-hr { height: 1px; background: var(--hairline); margin: 13px 0; }
+.artifact-md .md-link { color: var(--accent); }
 
 /* Labels row — mono chips, quiet remove, inline add */
 .editor-labels { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
@@ -575,7 +744,7 @@ body {
   font: var(--mono); letter-spacing: 0.05em; color: var(--ink-2);
   background: var(--paper); border: var(--border-field); border-radius: 4px; padding: 2px 4px 2px 7px;
 }
-.lbl.sys { cursor: pointer; color: var(--ink-4); border-style: dashed; padding: 2px 7px; background: none; }
+.lbl.sys { cursor: pointer; color: var(--ink-3); border-color: rgba(15, 15, 12, 0.22); border-style: dashed; padding: 2px 7px; background: none; }
 .lbl.sys:hover { color: var(--ink); border-color: rgba(15, 15, 12, 0.3); }
 .lbl.sys.on { color: var(--ink); background: var(--paper); border-style: solid; }
 .lbl-x {
@@ -583,11 +752,35 @@ body {
   color: var(--ink-4); font: 400 12px/1 lato, sans-serif;
 }
 .lbl-x:hover { color: var(--ink); }
-.lbl-add {
-  background: none; border: 1px dashed rgba(15, 15, 12, 0.15); border-radius: 4px;
-  cursor: pointer; color: var(--ink-3); padding: 2px 7px;
+/* Plain text action, not a faint dashed box (which read as empty). The color
+   beats the .t-meta class it also carries. */
+.lbl-add.lbl-add {
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--ink-2);
+  padding: 2px 5px;
 }
-.lbl-add:hover { color: var(--ink); border-color: rgba(15, 15, 12, 0.3); }
+.lbl-add:hover { color: var(--accent); }
+/* The private toggle wears the slate it means — muted, solid when on. */
+.lbl.sys.priv { color: var(--private); border-color: var(--private); }
+.lbl.sys.priv:hover { color: var(--private); border-color: var(--private); }
+.lbl.sys.priv.on {
+  color: #fff;
+  background: var(--private);
+  border-color: var(--private);
+}
+/* Author-an-output action — a plain text affordance, accent on hover. */
+.editor-add-output.editor-add-output {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--ink-3);
+  padding: 2px 0;
+  text-align: left;
+}
+.editor-add-output:hover { color: var(--accent); }
 .lbl-input {
   font: var(--mono); letter-spacing: 0.05em; color: var(--ink);
   background: var(--card); border: var(--border-field); border-radius: 4px;
@@ -622,36 +815,18 @@ body {
   user-select: none;
 }
 
-/* Urgent gradient: no gray-on-orange — every text element inside the open
-   card renders white (full or high-alpha), chips and log included. */
-.editor-card.urgent .editor-title,
-.editor-card.urgent .t-hero,
-.editor-card.urgent .t-title,
-.editor-card.urgent .t-note { color: #fff; }
-.editor-card.urgent .editor-desc { color: rgba(255, 255, 255, 0.92); }
-.editor-card.urgent .editor-desc:empty::before { color: rgba(255, 255, 255, 0.6); }
-.editor-card.urgent .editor-meta { color: #fff; }
-.editor-card.urgent .editor-log-line { color: #fff; }
-.editor-card.urgent .editor-more-btn,
-.editor-card.urgent .editor-artifact-row { color: rgba(255, 255, 255, 0.85); }
-.editor-card.urgent .editor-more-btn:hover,
-.editor-card.urgent .editor-artifact-row:hover { color: #fff; }
-.editor-card.urgent .editor-hairline { background: rgba(255, 255, 255, 0.35); }
-.editor-card.urgent .lbl { background: rgba(255, 255, 255, 0.14); border-color: rgba(255, 255, 255, 0.35); color: #fff; }
-.editor-card.urgent .lbl.sys { color: rgba(255, 255, 255, 0.85); border-color: rgba(255, 255, 255, 0.5); background: none; }
-.editor-card.urgent .lbl.sys:hover { color: #fff; border-color: rgba(255, 255, 255, 0.8); }
-.editor-card.urgent .lbl.sys.on { color: #fff; background: rgba(255, 255, 255, 0.18); border-color: rgba(255, 255, 255, 0.7); border-style: solid; }
-.editor-card.urgent .lbl-x { color: rgba(255, 255, 255, 0.75); }
-.editor-card.urgent .lbl-x:hover { color: #fff; }
-.editor-card.urgent .lbl-add { color: rgba(255, 255, 255, 0.85); border-color: rgba(255, 255, 255, 0.5); }
-.editor-card.urgent .lbl-add:hover { color: #fff; border-color: rgba(255, 255, 255, 0.8); }
-.editor-card.urgent .open-act,
-.editor-card.urgent .open-act.promote,
-.editor-card.urgent .editor-action { color: #fff; }
-.editor-card.urgent .open-act:hover,
-.editor-card.urgent .editor-action:hover { color: #fff; text-decoration: underline; }
-.editor-card.urgent .open-sep,
-.editor-card.urgent .editor-action-sep { color: rgba(255, 255, 255, 0.6); }
+/* Gradient white text is scoped to the HEADER only — the body is paper, so
+   meta, labels, log, artifact, and the action row use normal ink. */
+.editor-card.urgent .editor-header .editor-title,
+.editor-card.urgent .editor-header .t-hero,
+.editor-card.urgent .editor-header .t-title,
+.editor-card.urgent .editor-header .t-note { color: #fff; }
+.editor-card.urgent .editor-header .x-close { color: rgba(255, 255, 255, 0.7); }
+.editor-card.urgent .editor-header .x-close:hover { color: #fff; }
+.editor-card.urgent .editor-header .editor-title:focus {
+  border-color: rgba(255, 255, 255, 0.5);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6);
+}
 
 /* user-select: text inside the open card */
 [data-open-card] * { user-select: text; }

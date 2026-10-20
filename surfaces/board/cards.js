@@ -125,12 +125,14 @@ export function renderCard(
     pending = false,
     highlightLabels = [],
     accents = undefined,
+    privateLabel = 'private',
     busy = false
   } = {}
 ) {
   const kind = cardKind(c)
   const pal = accentPalette(c, accents)
   const urgent = pal !== null
+  const priv = c.labels.includes(privateLabel)
   const imp = importance(c)
   const titleClass = imp === 'hero' ? 't-hero' : imp === 'title' ? 't-title' : 't-note'
   const dragAttrs = draggable ? ` draggable="true" data-s="${esc(c.shortname)}"` : ''
@@ -139,7 +141,7 @@ export function renderCard(
   if (kind === 'note') {
     const meta = c.due ? esc(shortDate(c.due)) : esc(shortDate(c.created))
     return (
-      `<article class="card note${pendingClass}${busy ? ' busy' : ''}" data-card="${esc(c.shortname)}" tabindex="-1"${dragAttrs}>` +
+      `<article class="card note${priv ? ' private' : ''}${pendingClass}${busy ? ' busy' : ''}" data-card="${esc(c.shortname)}" tabindex="-1"${dragAttrs}>` +
       `<button class="card-x" data-act="carddel" aria-label="delete" tabindex="-1">×</button>` +
       `<h3 class="${titleClass}">${esc(c.title)}</h3>` +
       (meta ? `<div class="t-meta m-faint">${meta}</div>` : '') +
@@ -154,6 +156,7 @@ export function renderCard(
     'post',
     highlighted ? 'active-edge' : '',
     urgent ? `urgent grad-${pal}` : '',
+    priv ? 'private' : '',
     busy ? 'busy' : '',
     pendingClass.trim()
   ]
@@ -203,7 +206,13 @@ export function renderCard(
  */
 export function renderOpenCard(
   c,
-  { status = c.status, highlightLabels = [], accents = undefined, busy = false } = {}
+  {
+    status = c.status,
+    highlightLabels = [],
+    accents = undefined,
+    privateLabel = 'private',
+    busy = false
+  } = {}
 ) {
   const pal = accentPalette(c, accents)
   const urgent = pal !== null
@@ -215,6 +224,15 @@ export function renderOpenCard(
   const metaParts = [esc(status), c.due ? esc(shortDate(c.due)) : '', `#${esc(c.shortname)}`]
     .filter(Boolean)
     .join(' · ')
+
+  // User notes — card content (sent to delegates by default), shown above the
+  // system activity log so they read as part of the card, not as events.
+  const noteLines = c.notes ?? []
+  const notesHtml = noteLines.length
+    ? `<div class="editor-notes">` +
+      noteLines.map((line) => `<div class="editor-note-line">${esc(line)}</div>`).join('') +
+      `</div>`
+    : ''
 
   const logLines = c.log ?? []
   const shown = logLines.slice(-3)
@@ -230,17 +248,16 @@ export function renderOpenCard(
       : ''
 
   const artifactsHtml =
-    c.artifacts && c.artifacts.length > 0
-      ? `<div class="editor-artifacts">` +
-        c.artifacts
-          .map(
-            (a) =>
-              `<button class="t-meta editor-artifact-row" data-act="artifact" data-file="${esc(a)}">${esc(a)}</button>` +
-              `<pre class="artifact-body" data-artifact-body="${esc(a)}" hidden></pre>`
-          )
-          .join('') +
-        `</div>`
-      : ''
+    `<div class="editor-artifacts">` +
+    (c.artifacts ?? [])
+      .map(
+        (a) =>
+          `<button class="t-meta editor-artifact-row" data-act="artifact" data-file="${esc(a)}">${esc(a)}</button>` +
+          `<div class="artifact-md" data-artifact-body="${esc(a)}" data-file="${esc(a)}" title="click to edit as markdown" hidden></div>`
+      )
+      .join('') +
+    `<button class="t-meta editor-add-output" data-act="addartifact">+ output</button>` +
+    `</div>`
 
   // Status-derived, stable action row. Backlog → the CLI command it will emit.
   // Backlog cards lead with the promote command but keep the full exits —
@@ -257,27 +274,37 @@ export function renderOpenCard(
       : doneDrop
 
   return (
-    `<article class="card editor-card card-open${urgent ? ` urgent grad-${pal}` : ''}${highlighted ? ' active-edge' : ''}${busy ? ' busy' : ''}" data-card="${esc(c.shortname)}" data-open-card tabindex="-1"${urgentStyle}>` +
+    `<article class="card editor-card card-open${urgent ? ` urgent grad-${pal}` : ''}${highlighted ? ' active-edge' : ''}${busy ? ' busy' : ''}" data-card="${esc(c.shortname)}" data-open-card tabindex="-1">` +
+    // Header band — the ONLY place the urgent/important gradient lives; the body
+    // below stays on paper so the card never reads as a heavy slab of color.
+    `<div class="editor-header"${urgentStyle}>` +
     `<button class="x-close" data-act="close" aria-label="close">×</button>` +
     `<div class="editor-field-wrap">` +
     `<div class="${titleClass} editor-title" data-field="title" contenteditable="plaintext-only" spellcheck="false" aria-label="title">${esc(c.title)}</div>` +
     `</div>` +
+    `</div>` +
+    `<div class="editor-body">` +
+    // The description/body lives here, on paper — always editable, with room to
+    // write, on any card (no Claude output required). Click and type.
     `<div class="editor-field-wrap editor-desc-wrap">` +
     `<div class="t-body editor-desc" data-field="description" contenteditable="plaintext-only" spellcheck="false" aria-label="description">${esc(c.description ?? '')}</div>` +
     `</div>` +
-    `<div class="editor-hairline"></div>` +
     `<div class="t-meta editor-meta">${metaParts}</div>` +
     `<div class="editor-labels">` +
-    // System labels (declared in config + the gradient pair) render as toggles —
-    // visible even when off, so they are discoverable.
-    [...new Set([...highlightLabels, ...Object.keys(accents ?? DEFAULT_ACCENTS)])]
+    // System labels (declared in config + the gradient pair + private) render as
+    // toggles — visible even when off, so they are discoverable.
+    [...new Set([...highlightLabels, ...Object.keys(accents ?? DEFAULT_ACCENTS), privateLabel])]
       .map((l) => {
         const on = c.labels.includes(l)
-        return `<button class="lbl sys${on ? ' on' : ''}" data-act="togglelabel" data-tag="${esc(l)}" aria-pressed="${on}">#${esc(l)}</button>`
+        const priv = l === privateLabel ? ' priv' : ''
+        return `<button class="lbl sys${priv}${on ? ' on' : ''}" data-act="togglelabel" data-tag="${esc(l)}" aria-pressed="${on}">#${esc(l)}</button>`
       })
       .join('') +
     c.labels
-      .filter((l) => !highlightLabels.includes(l) && l !== 'urgent' && l !== 'important')
+      .filter(
+        (l) =>
+          !highlightLabels.includes(l) && l !== 'urgent' && l !== 'important' && l !== privateLabel
+      )
       .map(
         (l) =>
           `<span class="lbl">#${esc(l)}<button class="lbl-x" data-act="untag" data-tag="${esc(l)}" aria-label="remove ${esc(l)}">×</button></span>`
@@ -285,10 +312,12 @@ export function renderOpenCard(
       .join('') +
     `<button class="t-meta lbl-add" data-act="addtag">+ tag</button>` +
     `</div>` +
-    activityHtml +
+    notesHtml +
     artifactsHtml +
+    activityHtml +
     `<div class="editor-hairline"></div>` +
     `<div class="editor-actions">${actions}</div>` +
+    `</div>` + // .editor-body
     `</article>`
   )
 }

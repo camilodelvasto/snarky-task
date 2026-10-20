@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { mkdtempSync, mkdirSync, existsSync } from 'fs'
+import { mkdtempSync, mkdirSync, existsSync, writeFileSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { writeCard, readCard } from '../tasks/files'
@@ -10,7 +10,8 @@ import {
   handleLink,
   handleDelete,
   handleLabel,
-  handleUnlabel
+  handleUnlabel,
+  handleRename
 } from '../tasks/handlers'
 
 function dir(): string {
@@ -32,45 +33,52 @@ describe('handlers', () => {
     expect(card.due).toBe('2026-10-07')
     expect(card.title).toBe('write the NGO proposal')
   })
-  it('create uses the generator for the title when bound', async () => {
+  it('capture is deterministic: first line is the title, rest is description, no model', async () => {
     const tasksDir = dir()
-    const generator = { complete: async () => 'Write NGO proposal' }
     const shortname = await handleCreate(
-      { tasksDir, now, generator },
-      { refs: [], cleaned: 'gotta write the ngo proposal' }
+      { tasksDir, now },
+      { refs: [], cleaned: 'define our target market\nstart with the DACH region' }
     )
-    expect(readCard(join(tasksDir, 'cards', `${shortname}.md`)).title).toBe('Write NGO proposal')
+    const card = readCard(join(tasksDir, 'cards', `${shortname}.md`))
+    expect(card.title).toBe('define our target market')
+    expect(card.description).toBe('start with the DACH region')
   })
-  it('create sanitizes a reasoning-dump title: first usable line, quotes stripped, length-capped', async () => {
+  it('capture: #words become labels (or links when a card exists), stripped from the title', async () => {
     const tasksDir = dir()
-    const generator = {
-      complete: async () =>
-        'We are given a note: "create a new card: start prototype application".\nWe are to extract the underlying task and state it as a short imperative title. Steps: 1. The note says...'
-    }
+    writeCard(tasksDir, {
+      shortname: 'press-plan',
+      title: 'press plan',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
     const shortname = await handleCreate(
-      { tasksDir, now, generator },
-      { refs: [], cleaned: 'create a new card: start prototype application' }
+      { tasksDir, now },
+      {
+        refs: ['urgent', 'press-plan'],
+        cleaned: 'define our target market #urgent\nsee #press-plan'
+      }
     )
+    const card = readCard(join(tasksDir, 'cards', `${shortname}.md`))
+    expect(card.title).toBe('define our target market')
+    expect(card.labels).toEqual(['urgent'])
+    expect(card.links).toEqual(['press-plan'])
+  })
+  it('capture caps an overlong first line at one sanitized line', async () => {
+    const tasksDir = dir()
+    const long = 'a thought that just keeps going and going '.repeat(4)
+    const shortname = await handleCreate({ tasksDir, now }, { refs: [], cleaned: long })
     const card = readCard(join(tasksDir, 'cards', `${shortname}.md`))
     expect(card.title.length).toBeLessThanOrEqual(80)
     expect(card.title).not.toContain('\n')
   })
-  it('create throws when the generator returns nothing usable', async () => {
+  it('create with explicit title applies status/tags/due/desc', async () => {
     const tasksDir = dir()
-    const generator = { complete: async () => '  "" \n' }
-    await expect(
-      handleCreate({ tasksDir, now, generator }, { refs: [], cleaned: 'do a thing' })
-    ).rejects.toThrow(/no usable title/)
-  })
-  it('create with explicit title skips the generator and applies status/tags/due/desc', async () => {
-    const tasksDir = dir()
-    const generator = {
-      complete: async () => {
-        throw new Error('generator must not be called')
-      }
-    }
     const shortname = await handleCreate(
-      { tasksDir, now, generator },
+      { tasksDir, now },
       { refs: [], cleaned: 'create ship it $active' },
       {
         title: 'ship it',
@@ -134,6 +142,86 @@ describe('handlers', () => {
   })
   it('targeting a missing card throws', () => {
     expect(() => handleNote({ tasksDir: dir(), now }, 'ghost', 'hello')).toThrow(/card not found/)
+  })
+  it('handleNote writes a note (card content), not a system log entry', () => {
+    const tasksDir = dir()
+    writeCard(tasksDir, {
+      shortname: 'c',
+      title: 'c',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: ['2026-10-01 00:00 — created']
+    })
+    handleNote({ tasksDir, now }, 'c', 'aws_id:abc123')
+    const card = readCard(join(tasksDir, 'cards', 'c.md'))
+    expect(card.notes.some((n) => n.includes('aws_id:abc123'))).toBe(true)
+    expect(card.log.some((l) => l.includes('aws_id'))).toBe(false) // not in the system log
+  })
+})
+
+describe('handleRename (copy/delete — slug follows the title)', () => {
+  it('renames to a new slug, moves artifacts, repoints links, deletes the old', () => {
+    const tasksDir = dir()
+    writeCard(tasksDir, {
+      shortname: 'interconexion',
+      title: 'interconexion',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: ['urgent'],
+      description: 'body',
+      notes: ['n1'],
+      log: ['2026-10-01 00:00 — created']
+    })
+    writeCard(tasksDir, {
+      shortname: 'other',
+      title: 'other',
+      status: 'active',
+      created: '2026-10-01',
+      links: ['interconexion'],
+      labels: [],
+      description: '',
+      log: []
+    })
+    mkdirSync(join(tasksDir, 'artifacts', 'interconexion'), { recursive: true })
+    writeFileSync(join(tasksDir, 'artifacts', 'interconexion', 'out.md'), 'output')
+
+    const slug = handleRename({ tasksDir, now }, 'interconexion', 'Evaluacion Puentes RAG')
+    expect(slug).toBe('evaluacion-puentes-rag')
+    // old gone, new exists with preserved content
+    expect(existsSync(join(tasksDir, 'cards', 'interconexion.md'))).toBe(false)
+    const nw = readCard(join(tasksDir, 'cards', 'evaluacion-puentes-rag.md'))
+    expect(nw.title).toBe('Evaluacion Puentes RAG')
+    expect(nw.description).toBe('body')
+    expect(nw.notes).toEqual(['n1'])
+    expect(nw.labels).toEqual(['urgent'])
+    expect(nw.log.some((l) => l.includes('renamed from #interconexion'))).toBe(true)
+    // artifacts moved
+    expect(existsSync(join(tasksDir, 'artifacts', 'interconexion'))).toBe(false)
+    expect(
+      readFileSync(join(tasksDir, 'artifacts', 'evaluacion-puentes-rag', 'out.md'), 'utf-8')
+    ).toBe('output')
+    // link repointed
+    expect(readCard(join(tasksDir, 'cards', 'other.md')).links).toEqual(['evaluacion-puentes-rag'])
+  })
+  it('a same-slug title change is an in-place update (no copy)', () => {
+    const tasksDir = dir()
+    writeCard(tasksDir, {
+      shortname: 'press-plan',
+      title: 'press plan',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    const slug = handleRename({ tasksDir, now }, 'press-plan', 'Press Plan')
+    expect(slug).toBe('press-plan')
+    expect(readCard(join(tasksDir, 'cards', 'press-plan.md')).title).toBe('Press Plan')
   })
 })
 

@@ -108,6 +108,43 @@ describe('card files', () => {
     expect(card.log).toEqual(['2026-10-02 10:12 — declined'])
     expect(readFileSync(path, 'utf-8')).toContain('## Log')
   })
+  it('keeps notes and the system log in separate sections; appendLog still lands in ## Log', () => {
+    const dir = freshTasksDir()
+    const path = writeCard(dir, {
+      shortname: 'keys',
+      title: 'keys',
+      status: 'active',
+      created: '2026-10-19',
+      links: [],
+      labels: [],
+      description: 'desc',
+      notes: ['2026-10-19 22:17 — aws_id:abc123'],
+      log: ['2026-10-19 22:16 — created']
+    })
+    appendLog(path, '2026-10-19 22:20 — status → done')
+    const card = readCard(path)
+    expect(card.notes).toEqual(['2026-10-19 22:17 — aws_id:abc123'])
+    expect(card.log).toEqual(['2026-10-19 22:16 — created', '2026-10-19 22:20 — status → done'])
+    const raw = readFileSync(path, 'utf-8')
+    expect(raw).toContain('## Notes')
+    // the appended log line must be under ## Log, not ## Notes
+    expect(raw.indexOf('## Notes')).toBeLessThan(raw.indexOf('## Log'))
+  })
+  it('a card with no notes omits the ## Notes section', () => {
+    const dir = freshTasksDir()
+    const path = writeCard(dir, {
+      shortname: 'plain',
+      title: 'plain',
+      status: 'inbox',
+      created: '2026-10-19',
+      links: [],
+      labels: [],
+      description: 'x',
+      log: []
+    })
+    expect(readFileSync(path, 'utf-8')).not.toContain('## Notes')
+    expect(readCard(path).notes).toEqual([])
+  })
 })
 
 describe('slugify length', () => {

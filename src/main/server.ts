@@ -1,20 +1,23 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
-import { readFileSync, existsSync, readdirSync } from 'fs'
+import { readFileSync, existsSync, readdirSync, writeFileSync } from 'fs'
 import { join, extname, sep } from 'path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
 import { z } from 'zod'
 import { readSnapshot } from './tasks/snapshot'
 import { writeInstruction, readCard, writeCard, readInstruction } from './tasks/files'
+import { handleRename } from './tasks/handlers'
 import type { Engine } from './tasks/engine'
+import type { TaskdeckConfig } from './tasks/types'
 
 export interface ServerOptions {
-  tasksDir: string
-  engine: Engine
+  tasksDir: () => string
+  engine: () => Engine
   surfacesDir: string
   screenshot: () => Promise<string>
   /** Presentation config surfaced to the UIs (from config.json `ui`). */
-  ui?: { highlight_labels?: string[]; accent_labels?: Record<string, string> }
+  ui: () => TaskdeckConfig['ui']
+  project: () => { current: string; list: string[]; templates: string[] }
   port?: number
 }
 
@@ -64,14 +67,19 @@ function notFound(res: ServerResponse): void {
 }
 
 export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
-  const { tasksDir, engine, surfacesDir, screenshot, ui } = opts
+  const { tasksDir, engine, surfacesDir, screenshot, ui, project } = opts
   const port = opts.port ?? PORT
 
   const sseClients = new Set<ServerResponse>()
 
   function broadcast(): void {
     if (sseClients.size === 0) return
-    const snap = JSON.stringify({ ...readSnapshot(tasksDir), ui })
+    const snap = JSON.stringify({
+      ...readSnapshot(tasksDir()),
+      ui: ui(),
+      project: project(),
+      nav: engine().getNav()
+    })
     const msg = `data: ${snap}\n\n`
     for (const res of sseClients) {
       try {
@@ -95,7 +103,7 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
       { instruction: z.string() },
       async ({ instruction }) => {
         try {
-          const id = writeInstruction(tasksDir, instruction, new Date())
+          const id = writeInstruction(tasksDir(), instruction, new Date())
           return { content: [{ type: 'text' as const, text: JSON.stringify({ id }) }] }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -169,7 +177,12 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
       // --- API routes ---
 
       if (pathname === '/api/state' && req.method === 'GET') {
-        json(res, 200, { ...readSnapshot(tasksDir), ui })
+        json(res, 200, {
+          ...readSnapshot(tasksDir()),
+          ui: ui(),
+          project: project(),
+          nav: engine().getNav()
+        })
         return
       }
 
@@ -182,7 +195,12 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
         res.write('\n') // flush headers
         sseClients.add(res)
         // Send current state immediately
-        const snap = JSON.stringify({ ...readSnapshot(tasksDir), ui })
+        const snap = JSON.stringify({
+          ...readSnapshot(tasksDir()),
+          ui: ui(),
+          project: project(),
+          nav: engine().getNav()
+        })
         res.write(`data: ${snap}\n\n`)
         req.on('close', () => sseClients.delete(res))
         return
@@ -207,7 +225,7 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
           typeof body.action === 'string'
             ? { action: body.action, card: body.card, to: body.to, tags: body.tags }
             : undefined
-        const id = writeInstruction(tasksDir, body.text, new Date(), resolved)
+        const id = writeInstruction(tasksDir(), body.text, new Date(), resolved)
         json(res, 201, { id })
         return
       }
@@ -221,7 +239,7 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
 
         if (action === 'confirm') {
           try {
-            await engine.confirm(id)
+            await engine().confirm(id)
             json(res, 200, { ok: true })
           } catch (err) {
             json(res, 400, { error: err instanceof Error ? err.message : String(err) })
@@ -229,32 +247,32 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
           return
         }
         if (action === 'reject') {
-          const rqpath = join(tasksDir, 'queue', `${id}.md`)
+          const rqpath = join(tasksDir(), 'queue', `${id}.md`)
           if (!existsSync(rqpath)) {
             json(res, 400, { error: `instruction not found: ${id}` })
             return
           }
-          engine.reject(id)
+          engine().reject(id)
           json(res, 200, { ok: true })
           return
         }
         if (action === 'requeue') {
-          const rqpath = join(tasksDir, 'queue', `${id}.md`)
+          const rqpath = join(tasksDir(), 'queue', `${id}.md`)
           if (!existsSync(rqpath)) {
             json(res, 400, { error: `instruction not found: ${id}` })
             return
           }
-          engine.requeue(id, body.text)
+          engine().requeue(id, body.text)
           json(res, 200, { ok: true })
           return
         }
         if (action === 'delete') {
-          const qpath = join(tasksDir, 'queue', `${id}.md`)
+          const qpath = join(tasksDir(), 'queue', `${id}.md`)
           if (!existsSync(qpath)) {
             json(res, 400, { error: `instruction not found: ${id}` })
             return
           }
-          engine.deleteInstruction(id)
+          engine().deleteInstruction(id)
           json(res, 200, { ok: true })
           return
         }
@@ -263,7 +281,7 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
       }
 
       if (pathname === '/api/history' && req.method === 'GET') {
-        const dir = join(tasksDir, 'history')
+        const dir = join(tasksDir(), 'history')
         const list = existsSync(dir)
           ? readdirSync(dir)
               .filter((f) => f.endsWith('.md'))
@@ -284,8 +302,26 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
       }
 
       const artMatch = pathname.match(/^\/api\/artifacts\/([^/]+)\/([^/]+)$/)
+      if (artMatch && req.method === 'POST') {
+        const dir = join(tasksDir(), 'artifacts', decodeURIComponent(artMatch[1]))
+        const filePath = join(dir, decodeURIComponent(artMatch[2]))
+        // Traversal guard + no file creation through this door — edit-only.
+        if (!filePath.startsWith(dir + sep) || !existsSync(filePath)) {
+          notFound(res)
+          return
+        }
+        const body = await parseBody<{ content?: string }>(req, res)
+        if (body === null) return
+        if (typeof body.content !== 'string') {
+          json(res, 400, { error: 'content (string) required' })
+          return
+        }
+        writeFileSync(filePath, body.content)
+        json(res, 200, { ok: true })
+        return
+      }
       if (artMatch && req.method === 'GET') {
-        const dir = join(tasksDir, 'artifacts', decodeURIComponent(artMatch[1]))
+        const dir = join(tasksDir(), 'artifacts', decodeURIComponent(artMatch[1]))
         const filePath = join(dir, decodeURIComponent(artMatch[2]))
         // Traversal guard: the resolved path must stay inside this card's artifact dir
         if (!filePath.startsWith(dir + sep) || !existsSync(filePath)) {
@@ -294,6 +330,20 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
         }
         res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' })
         res.end(readFileSync(filePath))
+        return
+      }
+
+      // Collection route (no filename): author a blank artifact by hand. Routed
+      // through the engine so the card log is stamped and the row surfaces — the
+      // per-file POST above stays edit-only.
+      const artCreateMatch = pathname.match(/^\/api\/artifacts\/([^/]+)$/)
+      if (artCreateMatch && req.method === 'POST') {
+        try {
+          const file = engine().createArtifact(decodeURIComponent(artCreateMatch[1]))
+          json(res, 201, { file })
+        } catch (err) {
+          json(res, 404, { error: err instanceof Error ? err.message : String(err) })
+        }
         return
       }
 
@@ -308,7 +358,7 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
 
         if (body.action === 'delete') {
           // Route through the queue — no privileged side door
-          writeInstruction(tasksDir, `delete #${shortname}`, new Date())
+          writeInstruction(tasksDir(), `delete #${shortname}`, new Date())
           json(res, 200, { ok: true })
           return
         }
@@ -318,18 +368,26 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
             json(res, 400, { error: 'title cannot be empty' })
             return
           }
-          const cardPath = join(tasksDir, 'cards', `${shortname}.md`)
+          const cardPath = join(tasksDir(), 'cards', `${shortname}.md`)
           if (!existsSync(cardPath)) {
             json(res, 400, { error: `card not found: ${shortname}` })
             return
           }
           const card = readCard(cardPath)
-          writeCard(tasksDir, {
-            ...card,
-            ...(body.title !== undefined ? { title: body.title } : {}),
-            ...(body.description !== undefined ? { description: body.description } : {})
-          })
-          json(res, 200, { ok: true })
+          // Description first (in place), so a following reslug copies it along.
+          if (body.description !== undefined)
+            writeCard(tasksDir(), { ...card, description: body.description })
+          // A title change lets the slug follow: handleRename reslugs via
+          // copy/delete when the title maps to a new id, or updates in place when
+          // it maps back to the same one. Only run it when the title actually changed.
+          let shortnameOut = shortname
+          if (body.title !== undefined && body.title !== card.title)
+            shortnameOut = handleRename(
+              { tasksDir: tasksDir(), now: new Date() },
+              shortname,
+              body.title
+            )
+          json(res, 200, { ok: true, shortname: shortnameOut })
           return
         }
 

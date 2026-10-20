@@ -13,6 +13,7 @@ const card = (shortname: string, title: string, created = '2026-10-01'): Card =>
   links: [],
   labels: [],
   description: '',
+  notes: [],
   log: [],
   artifacts: []
 })

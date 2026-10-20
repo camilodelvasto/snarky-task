@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { startServer } from '../server'
@@ -14,8 +14,11 @@ let surfacesDir: string
 const fakeEngine = {
   confirm: async () => undefined,
   reject: () => undefined,
-  requeue: () => undefined
+  requeue: () => undefined,
+  getNav: () => undefined
 } as never
+
+const fakeProject = { current: 'default', list: ['default'], templates: [] }
 
 function makeTmpServer(): ReturnType<typeof startServer> {
   const td = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
@@ -24,11 +27,12 @@ function makeTmpServer(): ReturnType<typeof startServer> {
   mkdirSync(join(sd, 'feed'))
   writeFileSync(join(sd, 'feed', 'index.html'), '<html>feed</html>')
   return startServer({
-    tasksDir: td,
-    engine: fakeEngine,
+    tasksDir: () => td,
+    engine: () => fakeEngine,
     surfacesDir: sd,
     screenshot: async () => 'base64png',
-    ui: { highlight_labels: ['highlight'] },
+    ui: () => ({ highlight_labels: ['highlight'] }),
+    project: () => fakeProject,
     port: 0
   })
 }
@@ -42,11 +46,12 @@ beforeAll(async () => {
   mkdirSync(join(surfacesDir, 'fonts'))
   writeFileSync(join(surfacesDir, 'fonts', 'EBGaramond-Variable.woff2'), Buffer.from([0, 1, 2, 3]))
   const server = await startServer({
-    tasksDir,
-    engine: fakeEngine,
+    tasksDir: () => tasksDir,
+    engine: () => fakeEngine,
     surfacesDir,
     screenshot: async () => 'base64png',
-    ui: { highlight_labels: ['highlight'] },
+    ui: () => ({ highlight_labels: ['highlight'] }),
+    project: () => fakeProject,
     port: 0
   })
   base = `http://127.0.0.1:${server.port}`
@@ -79,7 +84,7 @@ describe('api', () => {
     const snap = await (await fetch(`${base}/api/state`)).json()
     expect(snap.cards.map((c: { shortname: string }) => c.shortname)).toContain('c1')
   })
-  it('card POST updates title through the door', async () => {
+  it('card POST title change reslugs: old file gone, new slug carries the title', async () => {
     writeCard(tasksDir, {
       shortname: 'x',
       title: 'Old',
@@ -87,7 +92,7 @@ describe('api', () => {
       created: '2026-10-01',
       links: [],
       labels: [],
-      description: '',
+      description: 'keep me',
       log: []
     })
     const res = await fetch(`${base}/api/cards/x`, {
@@ -96,7 +101,30 @@ describe('api', () => {
       body: JSON.stringify({ title: 'New title' })
     })
     expect(res.status).toBe(200)
-    expect(readCard(join(tasksDir, 'cards', 'x.md')).title).toBe('New title')
+    expect((await res.json()).shortname).toBe('new-title')
+    expect(existsSync(join(tasksDir, 'cards', 'x.md'))).toBe(false)
+    const nw = readCard(join(tasksDir, 'cards', 'new-title.md'))
+    expect(nw.title).toBe('New title')
+    expect(nw.description).toBe('keep me')
+  })
+  it('card POST with a same-slug title stays in place', async () => {
+    writeCard(tasksDir, {
+      shortname: 'press-plan',
+      title: 'press plan',
+      status: 'inbox',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    const res = await fetch(`${base}/api/cards/press-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Press Plan' })
+    })
+    expect((await res.json()).shortname).toBe('press-plan')
+    expect(readCard(join(tasksDir, 'cards', 'press-plan.md')).title).toBe('Press Plan')
   })
   it('card delete routes through the queue, not a side door', async () => {
     const res = await fetch(`${base}/api/cards/c1`, {
@@ -107,6 +135,43 @@ describe('api', () => {
     expect(res.status).toBe(200)
     const snap = readSnapshot(tasksDir)
     expect(snap.instructions.some((i) => i.raw === 'delete #c1')).toBe(true)
+  })
+  it('POST /api/artifacts/:card creates a blank artifact through the engine', async () => {
+    const td = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
+    for (const s of ['queue', 'cards', 'artifacts']) mkdirSync(join(td, s), { recursive: true })
+    const sd = mkdtempSync(join(tmpdir(), 'surf-'))
+    mkdirSync(join(sd, 'feed'))
+    writeFileSync(join(sd, 'feed', 'index.html'), '<html>feed</html>')
+    let calledWith = ''
+    const spyEngine = {
+      getNav: () => undefined,
+      confirm: async () => undefined,
+      reject: () => undefined,
+      requeue: () => undefined,
+      createArtifact: (c: string) => {
+        calledWith = c
+        return '2026-10-02T10-00-00.md'
+      }
+    } as never
+    const srv = await startServer({
+      tasksDir: () => td,
+      engine: () => spyEngine,
+      surfacesDir: sd,
+      screenshot: async () => 'x',
+      ui: () => ({ highlight_labels: [] }),
+      project: () => fakeProject,
+      port: 0
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/artifacts/draft`, {
+        method: 'POST'
+      })
+      expect(res.status).toBe(201)
+      expect(await res.json()).toEqual({ file: '2026-10-02T10-00-00.md' })
+      expect(calledWith).toBe('draft')
+    } finally {
+      await srv.close()
+    }
   })
   it('serves the feed surface', async () => {
     expect(await (await fetch(`${base}/feed/`)).text()).toContain('feed')
@@ -123,6 +188,11 @@ describe('api', () => {
     const res = await fetch(`${base}/api/state`)
     const snap = await res.json()
     expect(snap.ui).toEqual({ highlight_labels: ['highlight'] })
+  })
+  it('snapshot carries project info', async () => {
+    const res = await fetch(`${base}/api/state`)
+    const snap = await res.json()
+    expect(snap.project).toEqual({ current: 'default', list: ['default'], templates: [] })
   })
   it('serves vendored fonts with the woff2 mime type', async () => {
     const res = await fetch(`${base}/fonts/EBGaramond-Variable.woff2`)
@@ -199,6 +269,30 @@ describe('artifacts', () => {
     expect(await ok.text()).toContain('findings')
     const bad = await fetch(`${base}/api/artifacts/proto/..%2F..%2Fconfig.json`)
     expect([400, 403, 404]).toContain(bad.status)
+  })
+  it('POST saves an edit; guards traversal and missing files', async () => {
+    mkdirSync(join(tasksDir, 'artifacts', 'proto'), { recursive: true })
+    writeFileSync(join(tasksDir, 'artifacts', 'proto', 'edit.md'), 'before')
+    const ok = await fetch(`${base}/api/artifacts/proto/edit.md`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: '# after' })
+    })
+    expect(ok.status).toBe(200)
+    expect(readFileSync(join(tasksDir, 'artifacts', 'proto', 'edit.md'), 'utf-8')).toBe('# after')
+    // edit-only door: no file creation
+    const ghost = await fetch(`${base}/api/artifacts/proto/ghost.md`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'x' })
+    })
+    expect(ghost.status).toBe(404)
+    const trav = await fetch(`${base}/api/artifacts/proto/..%2F..%2Fconfig.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'x' })
+    })
+    expect([400, 403, 404]).toContain(trav.status)
   })
 })
 

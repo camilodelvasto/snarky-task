@@ -16,15 +16,15 @@ export class SurfaceViews {
     this.feed.webContents.loadURL(`${baseUrl}/feed/`)
     this.board.webContents.loadURL(`${baseUrl}/board/`)
 
-    // Cmd/Ctrl+K from either surface jumps to the console input — the views
-    // are separate webContents, so a page-level listener can't cross them;
-    // intercept in the main process instead.
+    // Cmd/Ctrl+K and Cmd/Ctrl+L from either surface jump to the console input
+    // (L for address-bar muscle memory) — the views are separate webContents,
+    // so a page-level listener can't cross them; intercept in the main process.
     for (const wc of [this.feed.webContents, this.board.webContents]) {
       wc.on('before-input-event', (e, input) => {
         if (
           input.type === 'keyDown' &&
           (input.meta || input.control) &&
-          input.key.toLowerCase() === 'k'
+          (input.key.toLowerCase() === 'k' || input.key.toLowerCase() === 'l')
         ) {
           e.preventDefault()
           this.focusConsole()

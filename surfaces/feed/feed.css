@@ -63,6 +63,19 @@ body {
 }
 .hist-toggle:hover { color: var(--text); }
 #done .row { opacity: 0.6; }
+/* graceful exit: fade + collapse before removal (max-height set inline from JS) */
+.row.bye, .drawer.bye {
+  transition: opacity 0.3s ease, max-height 0.3s ease, padding 0.3s ease, margin 0.3s ease, border-width 0.3s ease;
+  opacity: 0 !important;
+  max-height: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+  border-width: 0 !important;
+  overflow: hidden;
+  pointer-events: none;
+}
 
 /* ── instruction rows ────────────────────────────────────── */
 /* flex-basis auto (not 0): a full done log can never crush open rows to 0px */
@@ -187,4 +200,5 @@ button:active { transform: translateY(0); box-shadow: none; }
 .kv .v { font: var(--mono); color: var(--text-muted); overflow-wrap: anywhere; }
 .raw-full { white-space: pre-wrap; color: var(--text); }
 .err-v { color: var(--s-attention); }
+.result-v { white-space: pre-wrap; font: var(--mono); }
 .pick { color: var(--text-muted); font-size: 10px; }

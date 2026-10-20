@@ -1,21 +1,13 @@
-import { existsSync, readdirSync, rmSync } from 'fs'
+import { existsSync, readdirSync, rmSync, renameSync } from 'fs'
 import { join } from 'path'
 import { writeCard, readCard, appendLog, slugify } from './files'
 import type { CardStatus } from './types'
-import type { Generator } from '../capabilities/contracts'
 import type { PrepassResult } from './prepass'
 
 export interface HandlerCtx {
   tasksDir: string
   now: Date
-  generator?: Generator
 }
-
-const TITLE_PROMPT =
-  'Extract the underlying task from the following note and state it as a short imperative title (max 8 words). ' +
-  'Ignore any instruction phrasing about the card system itself — words like "create a card", "add a card", ' +
-  'or a target column ("active", "inbox") are not part of the task. Reply with the title only.\n\n' +
-  'Example: "create an active card: write press plan" → "Write press plan"\n\n'
 
 const stamp = (now: Date): string => now.toISOString().slice(0, 16).replace('T', ' ')
 
@@ -47,12 +39,22 @@ export async function handleCreate(
   pre: PrepassResult,
   opts?: { title?: string; desc?: string; tags?: string[]; due?: string; status?: CardStatus }
 ): Promise<string> {
-  const title = opts?.title
-    ? sanitizeTitle(opts.title)
-    : ctx.generator
-      ? sanitizeTitle(await ctx.generator.complete(TITLE_PROMPT + pre.cleaned))
-      : pre.cleaned
+  // Capture is deterministic — no model on this path, ever. The first line IS
+  // the title (sigil tokens stripped, sanitized to one short line); continuation
+  // lines are the description. A thought becomes a card instantly and offline.
   const taken = new Set(readdirSync(join(ctx.tasksDir, 'cards')).map((f) => f.replace(/\.md$/, '')))
+  const lines = pre.cleaned
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const firstLine = (lines[0] ?? '')
+    .replace(/#[a-z0-9-]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const title = sanitizeTitle(opts?.title ?? (firstLine || pre.cleaned))
+  // #words that name existing cards are links; the rest were meant as labels.
+  const refLinks = opts?.title ? [] : pre.refs.filter((r) => taken.has(r))
+  const refLabels = opts?.title ? [] : pre.refs.filter((r) => !taken.has(r))
   const shortname = slugify(title, taken)
   writeCard(ctx.tasksDir, {
     shortname,
@@ -60,9 +62,9 @@ export async function handleCreate(
     status: opts?.status ?? 'inbox',
     created: ctx.now.toISOString().slice(0, 10),
     due: opts?.due ?? pre.due,
-    links: opts?.title ? [] : pre.refs,
-    labels: opts?.tags ?? [],
-    description: opts?.title ? (opts?.desc ?? '') : pre.cleaned,
+    links: refLinks,
+    labels: opts?.tags ?? refLabels,
+    description: opts?.title ? (opts?.desc ?? '') : lines.slice(1).join('\n'),
     log: [`${stamp(ctx.now)} — created`]
   })
   return shortname
@@ -82,7 +84,15 @@ export function handleUpdateStatus(
 }
 
 export function handleNote(ctx: HandlerCtx, card: string, raw: string): string {
-  appendLog(cardPath(ctx, card), `${stamp(ctx.now)} — ${raw}`)
+  // A note is card content, not a system event — it goes to the ## Notes section
+  // (sent to delegates by default), not the ## Log. Read-modify-write so the two
+  // sections stay cleanly separate; same-card ops are serialized by the engine.
+  const path = cardPath(ctx, card)
+  const existing = readCard(path)
+  writeCard(ctx.tasksDir, {
+    ...existing,
+    notes: [...existing.notes, `${stamp(ctx.now)} — ${raw}`]
+  })
   return `note on #${card}`
 }
 
@@ -125,4 +135,52 @@ export function handleUnlabel(ctx: HandlerCtx, card: string, tags: string[]): st
 export function handleDelete(ctx: HandlerCtx, card: string): string {
   rmSync(cardPath(ctx, card))
   return `deleted #${card}`
+}
+
+/**
+ * Rename a card, letting the slug/id follow the title — implemented as
+ * copy-then-delete (per the simpler, safer path): write a new card under the
+ * title-derived slug with all content preserved, move its artifacts folder,
+ * repoint `#ref` links in other cards, then delete the old file. Returns the
+ * new shortname (the engine records it as the instruction's card).
+ *
+ * If the new title slugifies to the same id, this is a cheap in-place title
+ * update — no copy, no moved files, no broken references.
+ */
+export function handleRename(ctx: HandlerCtx, card: string, newTitle: string): string {
+  const title = sanitizeTitle(newTitle)
+  if (!title) throw new Error('rename needs a new title')
+  const path = cardPath(ctx, card) // throws if the card is missing
+  const old = readCard(path)
+
+  const taken = new Set(readdirSync(join(ctx.tasksDir, 'cards')).map((f) => f.replace(/\.md$/, '')))
+  taken.delete(card) // the old slug is free to reuse if the title maps back to it
+  const slug = slugify(title, taken)
+
+  if (slug === card) {
+    writeCard(ctx.tasksDir, { ...old, title })
+    appendLog(path, `${stamp(ctx.now)} — renamed to "${title}"`)
+    return card
+  }
+
+  // Copy to the new slug, preserving everything (notes/log/labels/status/due).
+  writeCard(ctx.tasksDir, {
+    ...old,
+    shortname: slug,
+    title,
+    log: [...old.log, `${stamp(ctx.now)} — renamed from #${card}`]
+  })
+  // Move the artifacts folder so prior outputs follow the card.
+  const oldArt = join(ctx.tasksDir, 'artifacts', card)
+  if (existsSync(oldArt)) renameSync(oldArt, join(ctx.tasksDir, 'artifacts', slug))
+  // Repoint `#ref` links in every other card (body-text refs are left as-is).
+  const cardsDir = join(ctx.tasksDir, 'cards')
+  for (const f of readdirSync(cardsDir).filter((n) => n.endsWith('.md'))) {
+    if (f === `${card}.md`) continue
+    const c = readCard(join(cardsDir, f))
+    if (c.links.includes(card))
+      writeCard(ctx.tasksDir, { ...c, links: c.links.map((l) => (l === card ? slug : l)) })
+  }
+  rmSync(path)
+  return slug
 }

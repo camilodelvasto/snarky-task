@@ -9,6 +9,7 @@
   --paper: #faf9f7; --card: #ffffff;
   --ink: #1c1c18; --ink-2: #52524c; --ink-3: #8a8a82; --ink-4: #c8c8c2;
   --accent: #ff1055; --hairline: #e8e8e4;
+  --private: #52524c; /* muted slate — a card held back from external agents */
   --radius: 6px;
   --border-float: 1px solid rgba(15, 15, 12, 0.055);
   --border-field: 1px solid rgba(15, 15, 12, 0.09);

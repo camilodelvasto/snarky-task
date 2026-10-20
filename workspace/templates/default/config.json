@@ -6,9 +6,11 @@
   "thresholds": { "card": 0.6 },
   "jobs": { "max_parallel": 3 },
   "confirmation_timeout_s": 300,
+  "done_ttl_s": 20,
   "ui": {
     "highlight_labels": ["highlight"],
-    "accent_labels": { "urgent": "fire", "important": "violet" }
+    "accent_labels": { "urgent": "fire", "important": "violet" },
+    "private_label": "private"
   },
   "collaborators": {
     "claude": { "use": "agent" },

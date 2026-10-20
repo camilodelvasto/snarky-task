@@ -1,6 +1,14 @@
 // src/main/tasks/engine.ts
 import { watch, FSWatcher } from 'chokidar'
-import { readdirSync, rmSync, existsSync, mkdirSync, writeFileSync, renameSync } from 'fs'
+import {
+  readdirSync,
+  rmSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  renameSync,
+  readFileSync
+} from 'fs'
 import { join } from 'path'
 import { readInstruction, patchInstruction, writeInstruction, appendLog, readCard } from './files'
 import { readSnapshot } from './snapshot'
@@ -14,19 +22,28 @@ import {
   handleLink,
   handleDelete,
   handleLabel,
-  handleUnlabel
+  handleUnlabel,
+  handleRename
 } from './handlers'
 import { parseCommand } from './cli'
-import type { Registry, TaskdeckConfig, CardStatus, RegistryAliases } from './types'
+import { buildDelegationContext } from './context'
+import type {
+  Registry,
+  TaskdeckConfig,
+  CardStatus,
+  RegistryAliases,
+  ProjectOps,
+  Scope
+} from './types'
 import type { Capabilities } from '../capabilities/contracts'
 import { JobPool } from './jobs'
-
 type ExecuteOpts = {
   title?: string
   desc?: string
   tags?: string[]
   due?: string
   with?: string
+  scope?: Scope
   card2?: string
 }
 
@@ -37,6 +54,7 @@ export interface EngineDeps {
   caps: Capabilities
   aliases: RegistryAliases
   onChange: () => void
+  projects?: ProjectOps
   now?: () => Date
 }
 
@@ -58,6 +76,12 @@ export class Engine {
   private pool: JobPool
   private cardFacts = new Map<string, CardFacts>()
   private startedAt = new Map<string, number>()
+  private doneAt = new Map<string, number>()
+  private sweepTimer?: ReturnType<typeof setInterval>
+  // Transient UI nav: an `open #card` publishes a card for the board to expand,
+  // delivered in the snapshot. A monotonic seq lets the board act exactly once.
+  private navState?: { card: string; seq: number }
+  private navSeq = 0
 
   constructor(deps: EngineDeps) {
     this.deps = deps
@@ -126,6 +150,16 @@ export class Engine {
       this.deps.onChange()
     })
     this.watchers = [q, c]
+    // Pre-existing done rows start their TTL at boot.
+    for (const f of readdirSync(this.queueDir()).filter((n) => n.endsWith('.md'))) {
+      const p = join(this.queueDir(), f)
+      try {
+        if (readInstruction(p).status === 'done') this.doneAt.set(p, this.now().getTime())
+      } catch {
+        /* skip */
+      }
+    }
+    if (this.deps.config.done_ttl_s) this.sweepTimer = setInterval(() => this.sweepDone(), 5000)
   }
 
   /** Re-read all cards into the known-facts cache — called after engine-driven writes so
@@ -163,6 +197,12 @@ export class Engine {
   async stop(): Promise<void> {
     for (const w of this.watchers) await w.close()
     for (const p of this.pendingConfirm.values()) clearTimeout(p.timer)
+    if (this.sweepTimer) clearInterval(this.sweepTimer)
+  }
+
+  /** Latest transient UI nav request (an `open #card`), for the snapshot. */
+  getNav(): { card: string; seq: number } | undefined {
+    return this.navState
   }
 
   private track(p: Promise<void>): void {
@@ -196,7 +236,34 @@ export class Engine {
 
   private setStatus(path: string, patch: Parameters<typeof patchInstruction>[1]): void {
     patchInstruction(path, patch)
+    // Track completion time for the done-TTL sweep (config.done_ttl_s).
+    if (patch.status === 'done') this.doneAt.set(path, this.now().getTime())
+    else if (patch.status !== undefined) this.doneAt.delete(path)
     this.deps.onChange()
+  }
+
+  /** Console hygiene: done rows auto-sweep into history/ after done_ttl_s.
+   *  Same motion as `clean`, on a timer — files move, nothing is deleted. */
+  sweepDone(): void {
+    const ttl = this.deps.config.done_ttl_s
+    if (!ttl) return
+    const cutoff = this.now().getTime() - ttl * 1000
+    const historyDir = join(this.deps.tasksDir, 'history')
+    let moved = false
+    for (const [path, at] of [...this.doneAt]) {
+      if (at > cutoff) continue
+      this.doneAt.delete(path)
+      if (!existsSync(path)) continue // cleaned/deleted meanwhile
+      try {
+        if (readInstruction(path).status !== 'done') continue // hand-requeued
+        mkdirSync(historyDir, { recursive: true })
+        renameSync(path, join(historyDir, path.split('/').pop()!))
+        moved = true
+      } catch {
+        /* half-written; next tick */
+      }
+    }
+    if (moved) this.deps.onChange()
   }
 
   /** Execution telemetry for a terminal patch: which engine ran the instruction and for
@@ -231,6 +298,7 @@ export class Engine {
       tags?: string[]
       due?: string
       with?: string
+      scope?: Scope
     }
   ): Promise<void> {
     const { tasksDir, registry, config, caps } = this.deps
@@ -293,7 +361,8 @@ export class Engine {
         desc: inst.desc,
         tags: inst.tags,
         due: inst.due,
-        with: inst.with
+        with: inst.with,
+        scope: inst.scope
       }
       resolution = {
         kind: 'action' as const,
@@ -328,6 +397,76 @@ export class Engine {
         return
       }
 
+      if (parsed.kind === 'project') {
+        const ops = this.deps.projects
+        if (!ops) {
+          this.setStatus(path, {
+            status: 'attention',
+            error: 'project operations not available',
+            ...this.telemetry(path, 'cli')
+          })
+          return
+        }
+        const p = parsed.project
+        try {
+          if (p.op === 'list') {
+            const cur = ops.current()
+            const lines = ops.list().map((n) => (n === cur ? `* ${n}` : `  ${n}`))
+            const tpl = ops.templates()
+            this.setStatus(path, {
+              status: 'done',
+              via: 'cli',
+              action: 'project',
+              result: lines.join('\n') + (tpl.length ? `\ntemplates: ${tpl.join(', ')}` : ''),
+              ...this.telemetry(path, 'cli')
+            })
+          } else if (p.op === 'switch') {
+            await ops.switch(p.name)
+            this.setStatus(path, {
+              status: 'done',
+              via: 'cli',
+              action: 'project',
+              result: `→ ${p.name}`,
+              ...this.telemetry(path, 'cli')
+            })
+          } else if (p.op === 'new') {
+            await ops.create(p.name, p.template)
+            await ops.switch(p.name)
+            this.setStatus(path, {
+              status: 'done',
+              via: 'cli',
+              action: 'project',
+              result: `created ${p.name}${p.template ? ` from ${p.template}` : ''} →`,
+              ...this.telemetry(path, 'cli')
+            })
+          } else {
+            // rm: destructive — park at the existing confirmation gate
+            const id = path.split('/').pop()!.replace(/\.md$/, '')
+            this.setStatus(path, {
+              status: 'needs_confirmation',
+              via: 'cli',
+              action: 'project_rm',
+              title: p.name,
+              ...this.telemetry(path, 'cli')
+            })
+            const timer = setTimeout(() => this.reject(id), config.confirmation_timeout_s * 1000)
+            this.pendingConfirm.set(id, {
+              action: 'project_rm',
+              card: undefined,
+              status: p.name,
+              timer
+            })
+          }
+        } catch (err) {
+          this.setStatus(path, {
+            status: 'attention',
+            error: err instanceof Error ? err.message : String(err),
+            ...this.telemetry(path, 'cli')
+          })
+        }
+        return
+      }
+
       if (parsed.kind === 'claimed') {
         // CLI claimed this instruction: patch frontmatter with via:cli and all parsed fields,
         // then execute without touching the resolver.
@@ -350,9 +489,17 @@ export class Engine {
           desc: cmd.desc,
           tags: cmd.tags.length ? cmd.tags : undefined,
           due: cmd.due,
-          with: cmd.with
+          with: cmd.with,
+          scope: cmd.scope
         })
-        cliOpts = { title: cmd.title, desc: cmd.desc, tags: cmd.tags, due: cmd.due, with: cmd.with }
+        cliOpts = {
+          title: cmd.title,
+          desc: cmd.desc,
+          tags: cmd.tags,
+          due: cmd.due,
+          with: cmd.with,
+          scope: cmd.scope
+        }
         if (cmd.card2) cliOpts = { ...cliOpts, card2: cmd.card2 }
         resolution = { kind: 'action' as const, action, card: cmd.card, status: cmd.to }
       } else if (parsed.kind === 'needs-card') {
@@ -390,9 +537,17 @@ export class Engine {
           to: cmd.to,
           tags: cmd.tags.length ? cmd.tags : undefined,
           due: cmd.due,
-          with: cmd.with
+          with: cmd.with,
+          scope: cmd.scope
         })
-        cliOpts = { title: cmd.title, desc: cmd.desc, tags: cmd.tags, due: cmd.due, with: cmd.with }
+        cliOpts = {
+          title: cmd.title,
+          desc: cmd.desc,
+          tags: cmd.tags,
+          due: cmd.due,
+          with: cmd.with,
+          scope: cmd.scope
+        }
         resolution = {
           kind: 'action' as const,
           action: cmd.action,
@@ -400,11 +555,17 @@ export class Engine {
           status: cmd.to
         }
       } else {
-        // No verb, no leading @collaborator, no slash: language is captured.
-        // Nobody — and no model — picks the action (spec: absence of command
-        // means create). The create handler owns title cleanup, due extraction,
-        // #ref links, #tag labels via prepass.
-        resolution = { kind: 'action' as const, action: 'create' }
+        // Declined: first token is not a command, not a leading @collaborator,
+        // not slash-forced, and not a '+' capture. It does NOT silently become a
+        // card — a typo'd command or a stray line should never be filed. Park
+        // loud so the mistake is visible and editable. Explicit capture is '+'.
+        const firstTok = raw.trim().split(/\s+/)[0] ?? ''
+        this.setStatus(path, {
+          status: 'attention',
+          error: `unknown command "${firstTok}" — start the line with + to capture a card`,
+          ...this.telemetry(path, 'cli')
+        })
+        return
       }
     }
 
@@ -452,8 +613,7 @@ export class Engine {
       }
       const ctx = {
         tasksDir: this.deps.tasksDir,
-        now: this.now(),
-        generator: this.deps.caps.generator
+        now: this.now()
       }
       try {
         let resolvedCard = card
@@ -476,7 +636,7 @@ export class Engine {
           if (resolvedCard && opts?.with) {
             finalAction = 'delegate'
             this.setStatus(path, { action: 'delegate', card: resolvedCard })
-            await this.delegateToCollaborator(resolvedCard, opts.with, opts?.title)
+            await this.delegateToCollaborator(resolvedCard, opts.with, opts?.title, opts?.scope)
           }
         } else if (action === 'update_status')
           handleUpdateStatus(ctx, card!, status as CardStatus, raw)
@@ -487,7 +647,14 @@ export class Engine {
         else if (action === 'unlabel') handleUnlabel(ctx, card!, opts?.tags ?? [])
         else if (action === 'delegate') {
           if (!opts?.with) throw new Error('delegate needs a collaborator')
-          await this.delegateToCollaborator(card!, opts.with, opts?.title)
+          await this.delegateToCollaborator(card!, opts.with, opts?.title, opts?.scope)
+        } else if (action === 'rename') resolvedCard = handleRename(ctx, card!, opts?.title ?? raw)
+        else if (action === 'open') {
+          // UI nav, not a file op: publish a transient open request the board
+          // picks up over the snapshot. The card was resolved like any card verb.
+          if (!existsSync(join(this.deps.tasksDir, 'cards', `${card}.md`)))
+            throw new Error(`card not found: ${card}`)
+          this.navState = { card: card!, seq: ++this.navSeq }
         } else throw new Error(`no handler for action "${action}"`)
         this.refreshCardFacts() // engine write — absorb before the watcher diffs it
         this.setStatus(path, {
@@ -540,13 +707,68 @@ export class Engine {
     this.refreshCardFacts()
   }
 
-  private async delegateToCollaborator(card: string, name: string, text?: string): Promise<void> {
-    const use = this.deps.config.collaborators?.[name]?.use
+  /** Author an output by hand: create a new empty artifact and log it, exactly
+   *  like a delegation minus the model. The card-file log line trips the watcher
+   *  so the new artifact row appears on the board. Returns the filename. */
+  createArtifact(card: string): string {
+    const cardPath = join(this.deps.tasksDir, 'cards', `${card}.md`)
+    if (!existsSync(cardPath)) throw new Error(`no card "#${card}"`)
+    const now = this.now()
+    const dir = join(this.deps.tasksDir, 'artifacts', card)
+    mkdirSync(dir, { recursive: true })
+    const stamp = now.toISOString().slice(0, 19).replace(/:/g, '-')
+    let file = `${stamp}.md`
+    let n = 1
+    while (existsSync(join(dir, file))) file = `${stamp}-${n++}.md`
+    writeFileSync(join(dir, file), '')
+    appendLog(
+      cardPath,
+      `${now.toISOString().slice(0, 16).replace('T', ' ')} — output added by hand → artifacts/${card}/${file}`
+    )
+    this.refreshCardFacts()
+    return file
+  }
+
+  /** Read the bodies of a card's prior artifacts (oldest → newest). */
+  private readArtifactTexts(card: string): string[] {
+    const dir = join(this.deps.tasksDir, 'artifacts', card)
+    if (!existsSync(dir)) return []
+    return readdirSync(dir)
+      .filter((n) => n.endsWith('.md'))
+      .sort()
+      .map((n) => readFileSync(join(dir, n), 'utf-8').trim())
+      .filter(Boolean)
+  }
+
+  private async delegateToCollaborator(
+    card: string,
+    name: string,
+    text?: string,
+    scope?: Scope
+  ): Promise<void> {
+    const collaborator = this.deps.config.collaborators?.[name]
+    const use = collaborator?.use
     if (!use) throw new Error(`unknown collaborator "${name}"`)
     const c = readCard(join(this.deps.tasksDir, 'cards', `${card}.md`))
-    const parts = [c.title, c.description, text ?? ''].filter((p) => p.trim())
+
+    // Privacy choke point: a card marked private never reaches an external agent.
+    // The local generator runs on-device, so it is still permitted.
+    const privateLabel = this.deps.config.ui?.private_label ?? 'private'
+    if (use === 'agent' && c.labels.includes(privateLabel))
+      throw new Error(`card #${card} is #${privateLabel} — not sent to external agent @${name}`)
+
+    // A collaborator may carry its own default scope; the instruction's scope wins.
+    const effective: Scope = scope ?? collaborator.scope ?? 'card'
+    const context = buildDelegationContext({
+      card: c,
+      scope: effective,
+      text,
+      artifactTexts: effective === 'card' ? [] : this.readArtifactTexts(card),
+      board: effective === 'board' ? readSnapshot(this.deps.tasksDir).cards : [],
+      privateLabel
+    })
     const prompt =
-      parts.join('\n\n') +
+      context +
       '\n\nReply with the deliverable text only (markdown welcome) — the caller stores your reply as a file; do not attempt to write files or call tools to save it.'
     const output = await this.runExecutor(use, prompt)
     this.writeArtifact(card, name, output)
@@ -558,6 +780,33 @@ export class Engine {
     clearTimeout(pending.timer)
     this.pendingConfirm.delete(id)
     const path = this.qpath(id)
+    if (pending.action === 'project_rm') {
+      // I1: read durable name from frontmatter title as fallback (survives crash between park + confirm)
+      const name = pending.status ?? readInstruction(path).title
+      if (!name) {
+        this.setStatus(path, { status: 'attention', error: 'project_rm: lost project name' })
+        return
+      }
+      try {
+        await this.deps.projects!.remove(name)
+        // I2: when the removed project IS the active one, its dir (containing `path`) is trashed
+        // before this point — guard against ENOENT
+        if (existsSync(path))
+          this.setStatus(path, {
+            status: 'done',
+            result: `removed ${name} (recoverable in workspace/.trash)`,
+            ...this.telemetry(path, 'cli')
+          })
+      } catch (err) {
+        if (existsSync(path))
+          this.setStatus(path, {
+            status: 'attention',
+            error: err instanceof Error ? err.message : String(err),
+            ...this.telemetry(path, 'cli')
+          })
+      }
+      return
+    }
     const inst = readInstruction(path)
     const pre = prepass(inst.raw, this.deps.caps.dates, this.now(), this.deps.registry)
     // Rebuild opts from the instruction's persisted frontmatter — patched at claim time —

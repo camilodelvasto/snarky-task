@@ -18,6 +18,8 @@ const deps = {
     label: 'resolve',
     unlabel: 'resolve',
     delete: 'resolve',
+    open: 'resolve',
+    rename: 'required',
     note: 'required',
     link: 'required',
     delegate: 'create'
@@ -75,6 +77,19 @@ describe('parseCommand — claiming', () => {
       cmd: { action: 'link', card: 'press-plan', card2: 'prototype' }
     })
   })
+  it('multiline note: continuation lines are the note text, not desc', () => {
+    expect(
+      parseCommand('note #press-plan\nremember the fonts\nand the spacing', deps)
+    ).toMatchObject({
+      kind: 'claimed',
+      cmd: {
+        action: 'note',
+        card: 'press-plan',
+        title: 'remember the fonts and the spacing',
+        desc: undefined
+      }
+    })
+  })
   it('multiline: lines after the first become desc', () => {
     const r = parseCommand('create ship it\nall the context\nsecond line', deps)
     expect(r).toMatchObject({
@@ -101,10 +116,94 @@ describe('parseCommand — declining (bare)', () => {
     const r = parseCommand('create x @bob', deps)
     expect(r.kind).toBe('error')
   })
-  it('plain language declines', () => {
+  it('plain language declines (the engine parks it; no silent card)', () => {
     expect(parseCommand('we should probably revisit the roadmap', deps)).toEqual({
       kind: 'declined'
     })
+  })
+})
+
+describe('parseCommand — remove alias (→ delete, classifier for fuzzy refs)', () => {
+  const d = { ...deps, aliases: { ...deps.aliases, delete: ['del', 'rm', 'drop', 'remove'] } }
+  it('remove #ref → deterministic delete', () => {
+    expect(parseCommand('remove #press-plan', d)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'delete', card: 'press-plan' }
+    })
+  })
+  it('remove <exact slug> → deterministic delete', () => {
+    expect(parseCommand('remove press plan', d)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'delete', card: 'press-plan' }
+    })
+  })
+  it('remove <fuzzy text> → needs-card (goes to the classifier)', () => {
+    expect(parseCommand('remove the card that says x', d)).toMatchObject({
+      kind: 'needs-card',
+      cmd: { action: 'delete' },
+      query: 'the card that says x'
+    })
+  })
+})
+
+describe('parseCommand — rename (slug follows)', () => {
+  it('rename #card <new title> claims a rename with the title as text', () => {
+    expect(parseCommand('rename #press-plan Q4 Press Plan', deps)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'rename', card: 'press-plan', title: 'Q4 Press Plan' }
+    })
+  })
+  it('rename without a #card parks (required)', () => {
+    const r = parseCommand('rename something new', deps)
+    expect(r.kind).toBe('error')
+    expect((r as { error: string }).error).toMatch(/rename needs a #card/)
+  })
+})
+
+describe('parseCommand — open (UI nav)', () => {
+  it('open #ref claims an open action', () => {
+    expect(parseCommand('open #press-plan', deps)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'open', card: 'press-plan' }
+    })
+  })
+  it('expand is an alias for open', () => {
+    const d = { ...deps, aliases: { ...deps.aliases, open: ['expand'] } }
+    expect(parseCommand('expand #press-plan', d)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'open', card: 'press-plan' }
+    })
+  })
+  it('open <fuzzy text> goes to the classifier (needs-card)', () => {
+    expect(parseCommand('open the munich thing', deps)).toMatchObject({
+      kind: 'needs-card',
+      cmd: { action: 'open' },
+      query: 'the munich thing'
+    })
+  })
+})
+
+describe('parseCommand — explicit capture (+)', () => {
+  it('+ <text> claims a create, routed through the create grammar', () => {
+    expect(parseCommand('+ buy milk', deps)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'create', title: 'buy milk' }
+    })
+  })
+  it('+<text> with no space also captures', () => {
+    expect(parseCommand('+buy milk', deps)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'create', title: 'buy milk' }
+    })
+  })
+  it('+ honors create sigils: #tag and $due', () => {
+    expect(parseCommand('+ call the plumber #urgent $today', deps)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'create', title: 'call the plumber', tags: ['urgent'], due: '2026-10-03' }
+    })
+  })
+  it('a bare + with no text errors (no blank card)', () => {
+    expect(parseCommand('+', deps).kind).toBe('error')
   })
 })
 
@@ -414,5 +513,72 @@ describe('parseCommand — absent target defaults to required', () => {
     const r2 = parseCommand('note some bare text with no hash', d)
     expect(r2.kind).toBe('error')
     expect((r2 as { error: string }).error).toMatch(/note needs a #card/)
+  })
+})
+
+describe('parseCommand — project verb', () => {
+  it('project / projects list', () => {
+    expect(parseCommand('projects', deps)).toEqual({ kind: 'project', project: { op: 'list' } })
+    expect(parseCommand('project', deps)).toEqual({ kind: 'project', project: { op: 'list' } })
+  })
+  it('project <slug> switches', () => {
+    expect(parseCommand('project house-renovation', deps)).toEqual({
+      kind: 'project',
+      project: { op: 'switch', name: 'house-renovation' }
+    })
+  })
+  it('project new with --template and `from` sugar', () => {
+    expect(parseCommand('project new house --template renovation', deps)).toEqual({
+      kind: 'project',
+      project: { op: 'new', name: 'house', template: 'renovation' }
+    })
+    expect(parseCommand('project new house from renovation', deps)).toEqual({
+      kind: 'project',
+      project: { op: 'new', name: 'house', template: 'renovation' }
+    })
+    expect(parseCommand('project new house', deps)).toEqual({
+      kind: 'project',
+      project: { op: 'new', name: 'house' }
+    })
+  })
+  it('project rm <slug>', () => {
+    expect(parseCommand('project rm house', deps)).toEqual({
+      kind: 'project',
+      project: { op: 'rm', name: 'house' }
+    })
+  })
+  it('fork is final: bad grammar parks loud', () => {
+    expect(parseCommand('project New House', deps).kind).toBe('error')
+    expect(parseCommand('project new', deps).kind).toBe('error')
+    expect(parseCommand('project house extra junk', deps).kind).toBe('error')
+    expect(parseCommand('/project rm', deps).kind).toBe('error')
+  })
+})
+
+describe('parseCommand — context scope sigil', () => {
+  it('^full sets cmd.scope on a delegation', () => {
+    const r = parseCommand('@claude review #prototype ^full', deps)
+    expect(r).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'delegate', with: 'claude', card: 'prototype', scope: 'full' }
+    })
+  })
+  it('^board sets the broadest scope', () => {
+    const r = parseCommand('delegate #prototype @claude ^board draft', deps)
+    expect(r).toMatchObject({ kind: 'claimed', cmd: { scope: 'board' } })
+  })
+  it('--scope full is the long form', () => {
+    const r = parseCommand('@claude review #prototype --scope full', deps)
+    expect(r).toMatchObject({ kind: 'claimed', cmd: { scope: 'full' } })
+  })
+  it('no sigil leaves scope undefined (engine defaults to card)', () => {
+    const r = parseCommand('@claude review #prototype', deps)
+    expect((r as { cmd: { scope?: string } }).cmd.scope).toBeUndefined()
+  })
+  it('an unknown scope value parks loud', () => {
+    expect(parseCommand('@claude review #prototype ^wat', deps)).toEqual({
+      kind: 'error',
+      error: '"^wat" is not a scope — use ^card, ^full, or ^board'
+    })
   })
 })

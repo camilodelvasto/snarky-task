@@ -39,6 +39,7 @@ export function writeInstruction(
     tags?: string[]
     due?: string
     with?: string
+    scope?: string
     via?: 'cli' | 'ai' | 'cli+ai'
   }
 ): string {
@@ -54,6 +55,7 @@ export function writeInstruction(
     if (resolved.tags && resolved.tags.length > 0) data.tags = resolved.tags
     if (resolved.due) data.due = resolved.due
     if (resolved.with) data.with = resolved.with
+    if (resolved.scope) data.scope = resolved.scope
     if (resolved.via) data.via = resolved.via
   }
   const content = matter.stringify(`\n${text}\n`, data)
@@ -75,6 +77,7 @@ export function readInstruction(path: string): Instruction {
     tags: data.tags ?? undefined,
     due: data.due ?? undefined,
     with: data.with ?? undefined,
+    scope: data.scope ?? undefined,
     via: data.via ?? undefined,
     engine: data.engine ?? undefined,
     model: data.model ?? undefined,
@@ -82,6 +85,7 @@ export function readInstruction(path: string): Instruction {
     ms: data.ms ?? undefined,
     pick: data.pick ?? undefined,
     error: data.error ?? undefined,
+    result: data.result ?? undefined,
     raw: content.trim()
   }
 }
@@ -107,6 +111,8 @@ export function patchInstruction(
       | 'tags'
       | 'due'
       | 'with'
+      | 'scope'
+      | 'result'
     >
   >
 ): void {
@@ -118,8 +124,12 @@ export function patchInstruction(
 }
 
 const LOG_HEADER = '## Log'
+const NOTES_HEADER = '## Notes'
 
-export function writeCard(tasksDir: string, card: Omit<Card, 'path' | 'artifacts'>): string {
+export function writeCard(
+  tasksDir: string,
+  card: Omit<Card, 'path' | 'artifacts' | 'notes'> & { notes?: string[] }
+): string {
   const path = join(tasksDir, 'cards', `${card.shortname}.md`)
   const front = {
     title: card.title,
@@ -129,19 +139,32 @@ export function writeCard(tasksDir: string, card: Omit<Card, 'path' | 'artifacts
     links: card.links,
     labels: card.labels
   }
-  const body = `\n${card.description}\n\n${LOG_HEADER}\n${card.log.map((l) => `- ${l}`).join('\n')}\n`
+  // Sections, in order: description, user notes (omitted when empty), system log.
+  // The log is ALWAYS last so appendLog can append a line to EOF and land in it.
+  const notes = card.notes ?? []
+  const notesBlock = notes.length
+    ? `${NOTES_HEADER}\n${notes.map((l) => `- ${l}`).join('\n')}\n\n`
+    : ''
+  const body = `\n${card.description}\n\n${notesBlock}${LOG_HEADER}\n${card.log.map((l) => `- ${l}`).join('\n')}\n`
   writeFileSync(path, matter.stringify(body, front))
   return path
 }
 
-export function readCard(path: string): Card {
-  const { data, content } = matter(readFileSync(path, 'utf-8'))
-  const [desc, logPart] = content.split(LOG_HEADER)
-  const log = (logPart ?? '')
+/** Parse the `- ` bullet lines out of one card-body section. */
+function bulletLines(section: string): string[] {
+  return section
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.startsWith('- '))
     .map((l) => l.slice(2))
+}
+
+export function readCard(path: string): Card {
+  const { data, content } = matter(readFileSync(path, 'utf-8'))
+  const [beforeLog, logPart] = content.split(LOG_HEADER)
+  const [desc, notesPart] = beforeLog.split(NOTES_HEADER)
+  const notes = bulletLines(notesPart ?? '')
+  const log = bulletLines(logPart ?? '')
   return {
     shortname: basename(path, '.md'),
     path,
@@ -152,6 +175,7 @@ export function readCard(path: string): Card {
     links: data.links ?? [],
     labels: data.labels ?? [],
     description: desc.trim(),
+    notes,
     log,
     artifacts: [] // populated by readSnapshot via listArtifacts
   }

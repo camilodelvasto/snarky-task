@@ -24,10 +24,3 @@ export function loadConfig(tasksDir: string): TaskdeckConfig {
       console.warn(`config.json thresholds.${t} is obsolete (slot resolution) — ignored`)
   return raw as TaskdeckConfig
 }
-
-export function resolveTasksDir(appRoot: string): string {
-  const base = process.env.XWEB_WORKSPACE || join(appRoot, 'workspace')
-  const dir = join(base, 'tasks')
-  if (!existsSync(dir)) throw new Error(`tasks workspace not found: ${dir}`)
-  return dir
-}

@@ -12,6 +12,7 @@
  */
 
 import { esc } from './cards.js'
+import { renderMarkdown } from './md.js'
 
 /**
  * Wire interactions on a freshly rendered open card.
@@ -71,6 +72,13 @@ export function wireOpenCard(el, card, api) {
 
   // ── Actions (declarative row — handlers just emit state changes) ───────────
   el.addEventListener('click', (e) => {
+    // Click the rendered markdown to edit it in place (raw md, saved on blur).
+    const mdBody = e.target.closest('.artifact-md')
+    if (mdBody && !mdBody.classList.contains('editing')) {
+      e.stopPropagation()
+      void editArtifact(el, card, mdBody.dataset.file)
+      return
+    }
     const act = e.target.closest('[data-act]')?.dataset.act
     if (!act) return
     e.stopPropagation()
@@ -130,7 +138,16 @@ export function wireOpenCard(el, card, api) {
       input.addEventListener('blur', () => api.flushRender())
     } else if (act === 'artifact') {
       const file = e.target.closest('[data-file]')?.dataset.file
-      if (file) void toggleArtifact(el, card, file)
+      if (file)
+        void (async () => {
+          await toggleArtifact(el, card, file)
+          // An empty output has no text to click — open it and drop into editing.
+          const body = el.querySelector(`[data-artifact-body="${CSS.escape(file)}"]`)
+          if (body && !body.hidden && !(body.dataset.raw ?? '').trim())
+            void editArtifact(el, card, file)
+        })()
+    } else if (act === 'addartifact') {
+      void addArtifact(card)
     } else if (act === 'more') {
       const activity = el.querySelector('.editor-activity')
       if (activity)
@@ -143,6 +160,18 @@ export function wireOpenCard(el, card, api) {
   // ── Latest artifact auto-loads — the delegation output IS the point ────────
   const latest = card.artifacts?.[card.artifacts.length - 1]
   if (latest) void toggleArtifact(el, card, latest, { forceOpen: true })
+
+  // A hand-authored output just landed on this card — drop straight into editing
+  // it (the create POST seeds the cache empty, so this opens a blank editor).
+  if (
+    pendingEditFile &&
+    pendingEditFile.card === card.shortname &&
+    card.artifacts?.includes(pendingEditFile.file)
+  ) {
+    const f = pendingEditFile.file
+    pendingEditFile = null
+    void editArtifact(el, card, f)
+  }
 
   // ── Initial focus ──────────────────────────────────────────────────────────
   if (api.editTitle && titleEl) {
@@ -158,7 +187,52 @@ export function wireOpenCard(el, card, api) {
   }
 }
 
-/** Toggle (and lazily fetch) an artifact's content below its row. */
+/** Toggle (and lazily fetch) an artifact's content below its row — rendered
+ *  as markdown; the raw source is cached on the element for editing. */
+// Artifact content cache, keyed "shortname/file". Decouples display from the
+// server round-trip: a board re-render rebuilds the card from scratch, and the
+// fresh (empty) body auto-loads from here instead of re-fetching — so an edit
+// in flight is never clobbered and content never flashes empty.
+const artifactCache = new Map()
+const artKey = (card, file) => `${card.shortname}/${file}`
+
+// Set when a hand-authored output is created; the next render of that card drops
+// into editing it. Cleared once consumed so it fires exactly once.
+let pendingEditFile = null
+
+/** Author a new blank output through the engine door, then edit it on arrival.
+ *  The engine logs the creation → the board re-renders with the new row → the
+ *  wire pass below sees pendingEditFile and opens it for editing. */
+async function addArtifact(card) {
+  let res
+  try {
+    res = await fetch(`/api/artifacts/${encodeURIComponent(card.shortname)}`, { method: 'POST' })
+  } catch (err) {
+    console.error('[board] add output failed:', err)
+    return
+  }
+  if (!res.ok) {
+    console.error(`[board] add output failed: HTTP ${res.status}`)
+    return
+  }
+  const { file } = await res.json()
+  artifactCache.set(artKey(card, file), '') // seed empty so the editor opens blank
+  pendingEditFile = { card: card.shortname, file }
+}
+
+function saveArtifact(card, file, raw) {
+  fetch(`/api/artifacts/${encodeURIComponent(card.shortname)}/${encodeURIComponent(file)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content: raw })
+  }).then(
+    (res) => {
+      if (!res.ok) console.error(`[board] artifact save failed: HTTP ${res.status}`)
+    },
+    (err) => console.error('[board] artifact save failed:', err)
+  )
+}
+
 async function toggleArtifact(el, card, file, { forceOpen = false } = {}) {
   const body = el.querySelector(`[data-artifact-body="${CSS.escape(file)}"]`)
   if (!body) return
@@ -166,15 +240,78 @@ async function toggleArtifact(el, card, file, { forceOpen = false } = {}) {
     body.hidden = true
     return
   }
-  if (!body.textContent) {
-    try {
-      const res = await fetch(
-        `/api/artifacts/${encodeURIComponent(card.shortname)}/${encodeURIComponent(file)}`
-      )
-      body.textContent = res.ok ? await res.text() : `could not load artifact (HTTP ${res.status})`
-    } catch (err) {
-      body.textContent = `could not load artifact: ${err}`
+  if (body.dataset.raw === undefined) {
+    const key = artKey(card, file)
+    if (artifactCache.has(key)) {
+      body.dataset.raw = artifactCache.get(key)
+    } else {
+      try {
+        const res = await fetch(
+          `/api/artifacts/${encodeURIComponent(card.shortname)}/${encodeURIComponent(file)}`
+        )
+        body.dataset.raw = res.ok
+          ? await res.text()
+          : `could not load artifact (HTTP ${res.status})`
+      } catch (err) {
+        body.dataset.raw = `could not load artifact: ${err}`
+      }
+      artifactCache.set(key, body.dataset.raw)
     }
+    body.innerHTML = renderMarkdown(body.dataset.raw)
   }
   body.hidden = false
+}
+
+/** Edit an artifact in place: raw markdown, plaintext-editable, with an explicit
+ *  Save/Cancel bar. Save (or clicking truly outside) commits + re-renders pretty;
+ *  Cancel discards. All display/cache work is synchronous so it survives any
+ *  board re-render the exit may trigger; the save POSTs in the background. */
+async function editArtifact(el, card, file) {
+  const body = el.querySelector(`[data-artifact-body="${CSS.escape(file)}"]`)
+  if (!body) return
+  if (body.hidden || body.dataset.raw === undefined)
+    await toggleArtifact(el, card, file, { forceOpen: true })
+  if (body.classList.contains('editing')) return
+
+  body.classList.add('editing')
+  body.textContent = body.dataset.raw ?? ''
+  body.contentEditable = 'plaintext-only'
+  body.focus()
+
+  const bar = document.createElement('div')
+  bar.className = 'artifact-edit-bar'
+  bar.innerHTML =
+    '<button class="artifact-save" type="button">Save</button>' +
+    '<button class="artifact-cancel" type="button">Cancel</button>'
+  body.after(bar)
+
+  let done = false
+  const finish = (save) => {
+    if (done) return
+    done = true
+    const raw = body.textContent ?? ''
+    const changed = save && raw !== body.dataset.raw
+    body.contentEditable = 'false'
+    body.classList.remove('editing')
+    bar.remove()
+    if (save) {
+      body.dataset.raw = raw
+      artifactCache.set(artKey(card, file), raw)
+    }
+    body.innerHTML = renderMarkdown(body.dataset.raw ?? '')
+    if (changed) saveArtifact(card, file, raw)
+  }
+
+  // mousedown + preventDefault keeps focus on the field (no premature blur-save)
+  bar.querySelector('.artifact-save').addEventListener('mousedown', (e) => {
+    e.preventDefault()
+    finish(true)
+  })
+  bar.querySelector('.artifact-cancel').addEventListener('mousedown', (e) => {
+    e.preventDefault()
+    finish(false)
+  })
+  // Clicking truly outside the card (or closing it) blurs the field → save,
+  // so edits are preserved rather than lost.
+  body.addEventListener('blur', () => finish(true), { once: true })
 }

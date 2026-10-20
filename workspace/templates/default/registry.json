@@ -1,0 +1,90 @@
+{
+  "aliases": {
+    "create": [
+      "new"
+    ],
+    "move": [
+      "mv"
+    ],
+    "promote": [
+      "upgrade"
+    ],
+    "backlog": [
+      "downgrade",
+      "demote"
+    ],
+    "note": [
+      "log"
+    ],
+    "delete": [
+      "del",
+      "rm",
+      "drop",
+      "remove"
+    ],
+    "open": [
+      "expand"
+    ]
+  },
+  "create": {
+    "class": "normal",
+    "target": "none"
+  },
+  "update_status": {
+    "class": "normal",
+    "target": "resolve",
+    "params": {
+      "status": [
+        "inbox",
+        "active",
+        "waiting",
+        "done",
+        "dropped"
+      ]
+    }
+  },
+  "note": {
+    "class": "normal",
+    "target": "required"
+  },
+  "label": {
+    "class": "normal",
+    "target": "resolve"
+  },
+  "unlabel": {
+    "class": "normal",
+    "target": "resolve"
+  },
+  "link": {
+    "class": "normal",
+    "target": "required"
+  },
+  "delete": {
+    "class": "destructive",
+    "target": "resolve"
+  },
+  "delegate": {
+    "class": "normal",
+    "target": "create"
+  },
+  "clean": {
+    "class": "meta"
+  },
+  "clear": {
+    "class": "meta"
+  },
+  "project": {
+    "class": "meta"
+  },
+  "project_rm": {
+    "class": "destructive"
+  },
+  "open": {
+    "class": "normal",
+    "target": "resolve"
+  },
+  "rename": {
+    "class": "normal",
+    "target": "required"
+  }
+}

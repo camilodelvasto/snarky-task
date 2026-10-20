@@ -2,12 +2,10 @@ import { app, BrowserWindow, dialog } from 'electron'
 import { join } from 'path'
 import { setupIpcHandlers } from './ipc-handlers'
 import { ScreenshotCleaner, SCREENSHOT_DIR } from './screenshot-cleanup'
-import { resolveTasksDir, loadConfig } from './tasks/config'
-import { loadRegistry } from './tasks/registry'
-import { bindCapabilities } from './capabilities/bind'
-import { Engine } from './tasks/engine'
 import { startServer } from './server'
 import { SurfaceViews } from './views'
+import { ProjectManager } from './project-manager'
+import { resolveRoot } from './tasks/projects'
 
 let mainWindow: BrowserWindow | null = null
 const screenshotCleaner = new ScreenshotCleaner(SCREENSHOT_DIR)
@@ -16,31 +14,25 @@ async function boot(): Promise<void> {
   const appRoot = app.getAppPath()
   const surfacesDir = join(appRoot, 'surfaces')
 
-  const tasksDir = resolveTasksDir(appRoot)
-  const config = loadConfig(tasksDir)
-  const { registry, aliases } = loadRegistry(tasksDir)
-  const caps = bindCapabilities(config)
-
   let broadcastFn: () => void = () => {}
   // late is a single-element container so the screenshot closure can capture it by reference.
   // The screenshot callback is only invoked by MCP tool calls, well after views is initialised.
   const late: { views?: SurfaceViews } = {}
 
-  const engine = new Engine({
-    tasksDir,
-    registry,
-    config,
-    caps,
-    aliases,
-    onChange: () => broadcastFn()
+  const root = resolveRoot(appRoot)
+  const pm = new ProjectManager(root, join(appRoot, 'workspace', 'templates'), () => broadcastFn())
+  await pm.boot()
+  app.on('will-quit', () => {
+    void pm.stop().catch(console.error)
   })
 
   // Start the server first so the port is known before constructing SurfaceViews.
   const server = await startServer({
-    tasksDir,
-    engine,
+    tasksDir: () => pm.getTasksDir(),
+    engine: () => pm.getEngine(),
     surfacesDir,
-    ui: config.ui,
+    ui: () => pm.getUi(),
+    project: () => ({ current: pm.current(), list: pm.list(), templates: pm.templates() }),
     screenshot: () => {
       if (!late.views) throw new Error('screenshot: SurfaceViews not yet initialised')
       return late.views.screenshotBoard()
@@ -76,8 +68,7 @@ async function boot(): Promise<void> {
     mainWindow = null
     screenshotCleaner.stop()
   })
-
-  engine.start()
+  // engine.start() is called inside ProjectManager.boot() — no separate call needed
 }
 
 if (!app.requestSingleInstanceLock()) {

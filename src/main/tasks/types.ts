@@ -2,6 +2,9 @@ export type InstructionStatus = 'queued' | 'working' | 'needs_confirmation' | 'a
 export type CardStatus = 'inbox' | 'active' | 'waiting' | 'done' | 'dropped'
 export const CARD_STATUSES: CardStatus[] = ['inbox', 'active', 'waiting', 'done', 'dropped']
 
+// How much context a delegation carries to a collaborator (see context.ts).
+export type Scope = 'card' | 'full' | 'board'
+
 export interface Instruction {
   id: string // filename without .md
   path: string
@@ -20,8 +23,19 @@ export interface Instruction {
   version?: string // runtime version when knowable (e.g. @receptron/laya@0.1.2)
   ms?: number // wall-clock processing time
   pick?: number // margin confidence of a model-bound card slot (via: cli+ai)
+  scope?: Scope // delegation context breadth — persisted so replay reproduces it
   error?: string
+  result?: string // listing/confirmation output shown in the drawer (e.g. project list)
   raw: string
+}
+
+export interface ProjectOps {
+  list(): string[]
+  templates(): string[]
+  current(): string
+  switch(name: string): Promise<void>
+  create(name: string, template?: string): Promise<void>
+  remove(name: string): Promise<void>
 }
 
 export interface Card {
@@ -34,13 +48,16 @@ export interface Card {
   links: string[]
   labels: string[]
   description: string
-  log: string[]
+  notes: string[] // user-authored notes — card content; sent to delegates by default
+  log: string[] // system events (status, labels, delegation) — withheld unless scope ≥ full
   artifacts: string[] // filenames in artifacts/<shortname>/
 }
 
 export interface Snapshot {
   instructions: Instruction[]
   cards: Card[]
+  project?: { current: string; list: string[]; templates: string[] }
+  nav?: { card: string; seq: number } // transient UI nav: board expands this card
 }
 
 export type OperationClass = 'normal' | 'destructive' | 'meta'
@@ -63,6 +80,11 @@ export interface TaskdeckConfig {
   thresholds: { card: number }
   jobs: { max_parallel: number }
   confirmation_timeout_s: number
-  collaborators?: Record<string, { use: 'agent' | 'generator' }>
-  ui?: { highlight_labels?: string[]; accent_labels?: Record<string, string> }
+  done_ttl_s?: number // auto-sweep done rows into history/ after this many seconds (absent → off)
+  collaborators?: Record<string, { use: 'agent' | 'generator'; scope?: Scope }>
+  ui?: {
+    highlight_labels?: string[]
+    accent_labels?: Record<string, string>
+    private_label?: string // label that is never sent to an external agent (default 'private')
+  }
 }

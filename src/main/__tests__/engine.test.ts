@@ -1,12 +1,12 @@
 // src/main/__tests__/engine.test.ts
 import { describe, it, expect, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, existsSync, readdirSync, writeFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, existsSync, readdirSync, writeFileSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import matter from 'gray-matter'
 import { Engine } from '../tasks/engine'
 import { writeInstruction, readInstruction, writeCard, readCard } from '../tasks/files'
-import type { Registry, TaskdeckConfig } from '../tasks/types'
+import type { Registry, TaskdeckConfig, ProjectOps } from '../tasks/types'
 import type { Capabilities, Choice } from '../capabilities/contracts'
 
 const registry: Registry = {
@@ -22,8 +22,12 @@ const registry: Registry = {
   link: { class: 'normal', target: 'required' },
   delete: { class: 'destructive', target: 'resolve' },
   delegate: { class: 'normal', target: 'create' },
+  open: { class: 'normal', target: 'resolve' },
+  rename: { class: 'normal', target: 'required' },
   clean: { class: 'meta' },
-  clear: { class: 'meta' }
+  clear: { class: 'meta' },
+  project: { class: 'meta' },
+  project_rm: { class: 'destructive' }
 }
 const config: TaskdeckConfig = {
   resolver: { impl: 'test' },
@@ -41,7 +45,10 @@ const aliases = {
   delete: ['del', 'rm']
 }
 
-function setup(answers: Array<{ key: string; confidence: number }>): {
+function setup(
+  answers: Array<{ key: string; confidence: number }>,
+  projects?: ProjectOps
+): {
   tasksDir: string
   engine: Engine
   onChange: ReturnType<typeof vi.fn>
@@ -66,16 +73,36 @@ function setup(answers: Array<{ key: string; confidence: number }>): {
     caps,
     aliases,
     onChange,
+    projects,
     now: () => new Date('2026-10-02T10:00:00')
   })
   return { tasksDir, engine, onChange }
+}
+
+function fakeProjects(): ProjectOps & { switched: string[]; removed: string[] } {
+  const state = { cur: 'default', switched: [] as string[], removed: [] as string[] }
+  return {
+    switched: state.switched,
+    removed: state.removed,
+    list: () => ['default', 'house'],
+    templates: () => ['gtd'],
+    current: () => state.cur,
+    switch: async (n) => {
+      state.cur = n
+      state.switched.push(n)
+    },
+    create: async () => {},
+    remove: async (n) => {
+      state.removed.push(n)
+    }
+  }
 }
 const qpath = (tasksDir: string, id: string): string => join(tasksDir, 'queue', `${id}.md`)
 
 describe('Engine.processFile', () => {
   it('create: queued → done, card exists', async () => {
     const { tasksDir, engine } = setup([])
-    const id = writeInstruction(tasksDir, 'write the ngo proposal', new Date())
+    const id = writeInstruction(tasksDir, '+ write the ngo proposal', new Date())
     await engine.processFile(qpath(tasksDir, id))
     expect(readInstruction(qpath(tasksDir, id)).status).toBe('done')
     expect(readdirSync(join(tasksDir, 'cards'))).toHaveLength(1)
@@ -126,7 +153,7 @@ describe('Engine.processFile', () => {
     )
     await engine.processFile(qpath(tasksDir, id))
     expect(readInstruction(qpath(tasksDir, id)).status).toBe('attention') // generator not bound → attention
-    engine.requeue(id, 'make a brand new card')
+    engine.requeue(id, '+ make a brand new card')
     await engine.drain()
     const left = readdirSync(join(tasksDir, 'queue')).map((f) =>
       readInstruction(join(tasksDir, 'queue', f))
@@ -377,7 +404,7 @@ describe('Engine.processFile', () => {
 
   it('clean sweeps done queue files into history — a console keeps its scrollback', async () => {
     const { tasksDir, engine } = setup([])
-    const a = writeInstruction(tasksDir, 'make something', new Date('2026-10-02T10:00:00'))
+    const a = writeInstruction(tasksDir, '+ make something', new Date('2026-10-02T10:00:00'))
     await engine.processFile(qpath(tasksDir, a))
     const c = writeInstruction(tasksDir, 'clean', new Date('2026-10-02T10:00:01'))
     await engine.processFile(qpath(tasksDir, c))
@@ -386,16 +413,68 @@ describe('Engine.processFile', () => {
     // the done instruction survives, telemetry and all, in history/
     const hist = readInstruction(join(tasksDir, 'history', `${a}.md`))
     expect(hist.status).toBe('done')
-    expect(hist.raw).toBe('make something')
+    expect(hist.raw).toBe('+ make something')
+  })
+  it('done rows auto-sweep into history after done_ttl_s', async () => {
+    const tasksDir = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
+    for (const s of ['queue', 'cards', 'artifacts'])
+      mkdirSync(join(tasksDir, s), { recursive: true })
+    let clock = new Date('2026-10-02T10:00:00').getTime()
+    const caps: Capabilities = {
+      dates: { extract: (t: string) => ({ cleaned: t }) },
+      resolver: {
+        decide: async () => {
+          throw new Error('resolver must not be consulted')
+        }
+      }
+    }
+    const engine = new Engine({
+      tasksDir,
+      registry,
+      config: { ...config, done_ttl_s: 20 },
+      caps,
+      aliases,
+      onChange: vi.fn(),
+      now: () => new Date(clock)
+    })
+    const id = writeInstruction(tasksDir, '+ capture this thought', new Date(clock))
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('done')
+    engine.sweepDone()
+    expect(existsSync(qpath(tasksDir, id))).toBe(true) // too fresh
+    clock += 21_000
+    engine.sweepDone()
+    expect(existsSync(qpath(tasksDir, id))).toBe(false)
+    expect(readInstruction(join(tasksDir, 'history', `${id}.md`)).status).toBe('done')
+  })
+  it('open #card publishes a transient nav (seq increments), done, no file change', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'target',
+      title: 'target',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: 'body',
+      log: []
+    })
+    expect(engine.getNav()).toBeUndefined()
+    const id = writeInstruction(tasksDir, 'open #target', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('done')
+    expect(engine.getNav()).toEqual({ card: 'target', seq: 1 })
+    // the card itself is untouched
+    expect(readCard(join(tasksDir, 'cards', 'target.md')).description).toBe('body')
   })
   it('clear wipes the scrollback — history and done rows — but never cards', async () => {
     const { tasksDir, engine } = setup([])
     // one swept-to-history row, one fresh done row, one card
-    const a = writeInstruction(tasksDir, 'make something', new Date('2026-10-02T10:00:00'))
+    const a = writeInstruction(tasksDir, '+ make something', new Date('2026-10-02T10:00:00'))
     await engine.processFile(qpath(tasksDir, a))
     const sweep = writeInstruction(tasksDir, 'clean', new Date('2026-10-02T10:00:01'))
     await engine.processFile(qpath(tasksDir, sweep))
-    const b = writeInstruction(tasksDir, 'make another thing', new Date('2026-10-02T10:00:02'))
+    const b = writeInstruction(tasksDir, '+ make another thing', new Date('2026-10-02T10:00:02'))
     await engine.processFile(qpath(tasksDir, b))
     expect(readdirSync(join(tasksDir, 'cards'))).toHaveLength(2)
 
@@ -577,6 +656,213 @@ describe('Engine collaborator delegation', () => {
   })
 })
 
+describe('Engine delegation scope & privacy', () => {
+  function delegateSetup(opts: {
+    collaborators: TaskdeckConfig['collaborators']
+    agentRun?: (p: string) => Promise<string>
+    generatorComplete?: (p: string) => Promise<string>
+  }): { tasksDir: string; engine: Engine } {
+    const tasksDir = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
+    for (const s of ['queue', 'cards', 'artifacts'])
+      mkdirSync(join(tasksDir, s), { recursive: true })
+    const caps: Capabilities = {
+      dates: { extract: (t: string) => ({ cleaned: t }) },
+      resolver: {
+        decide: async () => {
+          throw new Error('no resolver on cli path')
+        }
+      },
+      agent: { run: opts.agentRun ?? (async () => 'agent out') },
+      generator: { complete: opts.generatorComplete ?? (async () => 'gen out') }
+    }
+    const engine = new Engine({
+      tasksDir,
+      registry,
+      config: { ...config, collaborators: opts.collaborators },
+      caps,
+      aliases,
+      onChange: vi.fn(),
+      now: () => new Date('2026-10-02T10:00:00')
+    })
+    return { tasksDir, engine }
+  }
+
+  it('refuses a private card to an external agent and parks in attention', async () => {
+    const { tasksDir, engine } = delegateSetup({ collaborators: { claude: { use: 'agent' } } })
+    writeCard(tasksDir, {
+      shortname: 'secret',
+      title: 'Salary plan',
+      status: 'active',
+      created: '2026-10-02',
+      links: [],
+      labels: ['private'],
+      description: 'confidential',
+      log: ['2026-10-02 10:00 — created']
+    })
+    const id = writeInstruction(
+      tasksDir,
+      'delegate #secret @claude',
+      new Date('2026-10-02T10:00:00'),
+      {
+        action: 'delegate',
+        card: 'secret',
+        with: 'claude',
+        via: 'cli'
+      }
+    )
+    await engine.processFile(qpath(tasksDir, id))
+    await engine.drain()
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('attention')
+    expect(inst.error).toMatch(/private/)
+    expect(existsSync(join(tasksDir, 'artifacts', 'secret'))).toBe(false)
+  })
+
+  it('still lets a private card go to the local generator', async () => {
+    const { tasksDir, engine } = delegateSetup({ collaborators: { local: { use: 'generator' } } })
+    writeCard(tasksDir, {
+      shortname: 'secret',
+      title: 'Salary plan',
+      status: 'active',
+      created: '2026-10-02',
+      links: [],
+      labels: ['private'],
+      description: 'confidential',
+      log: ['2026-10-02 10:00 — created']
+    })
+    const id = writeInstruction(
+      tasksDir,
+      'delegate #secret @local',
+      new Date('2026-10-02T10:00:00'),
+      {
+        action: 'delegate',
+        card: 'secret',
+        with: 'local',
+        via: 'cli'
+      }
+    )
+    await engine.processFile(qpath(tasksDir, id))
+    await engine.drain()
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('done')
+    expect(readdirSync(join(tasksDir, 'artifacts', 'secret'))).toHaveLength(1)
+  })
+
+  it('full scope sends the card activity log to the collaborator', async () => {
+    let captured = ''
+    const { tasksDir, engine } = delegateSetup({
+      collaborators: { claude: { use: 'agent' } },
+      agentRun: async (p) => {
+        captured = p
+        return 'ok'
+      }
+    })
+    writeCard(tasksDir, {
+      shortname: 'draft',
+      title: 'Draft reply',
+      status: 'active',
+      created: '2026-10-02',
+      links: [],
+      labels: [],
+      description: 'answer the vendor',
+      log: ['2026-10-02 10:00 — created', '2026-10-02 11:00 — noted the deadline']
+    })
+    const id = writeInstruction(
+      tasksDir,
+      'delegate #draft @claude',
+      new Date('2026-10-02T10:00:00'),
+      {
+        action: 'delegate',
+        card: 'draft',
+        with: 'claude',
+        scope: 'full',
+        via: 'cli'
+      }
+    )
+    await engine.processFile(qpath(tasksDir, id))
+    await engine.drain()
+    expect(captured).toContain('## Activity')
+    expect(captured).toContain('noted the deadline')
+  })
+
+  it('board scope sends a roster of the other live cards, private ones omitted', async () => {
+    let captured = ''
+    const { tasksDir, engine } = delegateSetup({
+      collaborators: { claude: { use: 'agent' } },
+      agentRun: async (p) => {
+        captured = p
+        return 'ok'
+      }
+    })
+    const base = {
+      status: 'active' as const,
+      created: '2026-10-02',
+      links: [],
+      log: ['2026-10-02 10:00 — created']
+    }
+    writeCard(tasksDir, {
+      ...base,
+      shortname: 'draft',
+      title: 'Draft reply',
+      labels: [],
+      description: ''
+    })
+    writeCard(tasksDir, {
+      ...base,
+      shortname: 'book-venue',
+      title: 'Book venue',
+      labels: [],
+      description: ''
+    })
+    writeCard(tasksDir, {
+      ...base,
+      shortname: 'salary',
+      title: 'Salary review',
+      labels: ['private'],
+      description: ''
+    })
+    const id = writeInstruction(
+      tasksDir,
+      'delegate #draft @claude',
+      new Date('2026-10-02T10:00:00'),
+      {
+        action: 'delegate',
+        card: 'draft',
+        with: 'claude',
+        scope: 'board',
+        via: 'cli'
+      }
+    )
+    await engine.processFile(qpath(tasksDir, id))
+    await engine.drain()
+    expect(captured).toContain('#book-venue')
+    expect(captured).not.toContain('salary')
+  })
+})
+
+describe('Engine.createArtifact (author an output by hand)', () => {
+  it('writes an empty artifact file and logs it on the card', () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'draft',
+      title: 'Draft reply',
+      status: 'active',
+      created: '2026-10-02',
+      links: [],
+      labels: [],
+      description: 'answer the vendor',
+      log: ['2026-10-02 10:00 — created']
+    })
+    const file = engine.createArtifact('draft')
+    expect(file).toMatch(/\.md$/)
+    const artPath = join(tasksDir, 'artifacts', 'draft', file)
+    expect(existsSync(artPath)).toBe(true)
+    expect(readFileSync(artPath, 'utf-8')).toBe('')
+    expect(readCard(join(tasksDir, 'cards', 'draft.md')).log.join('\n')).toMatch(
+      /output added by hand/
+    )
+  })
+})
+
 describe('Engine card reconciliation (direct edits are ops)', () => {
   it('logs status and description changes from a direct edit, exactly once', () => {
     const { tasksDir, engine } = setup([])
@@ -725,11 +1011,25 @@ describe('Engine CLI layer', () => {
     expect(inst.status).toBe('attention')
     expect(inst.error).toMatch(/unknown command "createx"/)
   })
-  it('language captures: no verb → create, no resolver call, via: cli', async () => {
+  it('bare non-command input does NOT capture — it parks loud (no silent cards)', async () => {
     const { tasksDir, engine } = setup([]) // strict resolver: any call throws
     const id = writeInstruction(
       tasksDir,
-      'gotta fix the balcony door',
+      'remove hetzner payment card',
+      new Date('2026-10-02T10:00:00')
+    )
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('attention')
+    expect(inst.error).toMatch(/unknown command "remove" — start the line with \+ to capture/)
+    expect(readdirSync(join(tasksDir, 'cards'))).toHaveLength(0) // nothing filed
+  })
+
+  it('+ captures explicitly: a card is filed, no resolver call, via: cli', async () => {
+    const { tasksDir, engine } = setup([]) // strict resolver: any call throws
+    const id = writeInstruction(
+      tasksDir,
+      '+ gotta fix the balcony door',
       new Date('2026-10-02T10:00:00')
     )
     await engine.processFile(qpath(tasksDir, id))
@@ -737,10 +1037,12 @@ describe('Engine CLI layer', () => {
     expect(inst.status).toBe('done')
     expect(inst.via).toBe('cli')
     expect(inst.action).toBe('create')
-    expect(readdirSync(join(tasksDir, 'cards'))).toHaveLength(1)
+    const cards = readdirSync(join(tasksDir, 'cards'))
+    expect(cards).toHaveLength(1)
+    expect(readCard(join(tasksDir, 'cards', cards[0])).title).toBe('gotta fix the balcony door')
   })
 
-  it('a question pushed at the system is capture, never mutation', async () => {
+  it('a question pushed at the system parks, never mutates', async () => {
     const { tasksDir, engine } = setup([])
     writeCard(tasksDir, {
       shortname: 'record-screencasts',
@@ -755,7 +1057,7 @@ describe('Engine CLI layer', () => {
     const id = writeInstruction(tasksDir, 'what is a screencast?', new Date('2026-10-02T10:00:00'))
     await engine.processFile(qpath(tasksDir, id))
     const inst = readInstruction(qpath(tasksDir, id))
-    expect(inst.action).toBe('create')
+    expect(inst.status).toBe('attention')
     expect(readCard(join(tasksDir, 'cards', 'record-screencasts.md')).status).toBe('active') // untouched
   })
   it('needs-card: CLI verb + resolver card pick executes and marks via: cli+ai', async () => {
@@ -896,5 +1198,90 @@ describe('Engine label actions', () => {
     await engine.processFile(qpath(tasksDir, id))
     expect(readInstruction(qpath(tasksDir, id)).status).toBe('done')
     expect(readCard(join(tasksDir, 'cards', 'proto.md')).labels).toEqual(['highlight'])
+  })
+})
+
+describe('Engine project ops', () => {
+  it('projects lists into result, via cli', async () => {
+    const projects = fakeProjects()
+    const { tasksDir, engine } = setup([], projects)
+    const id = writeInstruction(tasksDir, 'projects', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('done')
+    expect(inst.result).toContain('* default')
+    expect(inst.result).toContain('house')
+    expect(inst.result).toContain('templates: gtd')
+  })
+  it('project <name> switches', async () => {
+    const projects = fakeProjects()
+    const { tasksDir, engine } = setup([], projects)
+    const id = writeInstruction(tasksDir, 'project house', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    expect(projects.switched).toEqual(['house'])
+    expect(readInstruction(qpath(tasksDir, id)).result).toBe('→ house')
+  })
+  it('project rm parks at confirmation; confirm removes; reject does not', async () => {
+    const projects = fakeProjects()
+    const { tasksDir, engine } = setup([], projects)
+    const id = writeInstruction(tasksDir, 'project rm house', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('needs_confirmation')
+    await engine.confirm(id)
+    expect(projects.removed).toEqual(['house'])
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('done')
+  })
+  it('project_rm confirm reads the project name from instruction title as fallback when pending.status is absent', async () => {
+    // Verify that after parking, the instruction's frontmatter title carries the project name —
+    // so the new `pending.status ?? readInstruction(path).title` fallback has the right value.
+    const projects = fakeProjects()
+    const { tasksDir, engine } = setup([], projects)
+    const id = writeInstruction(tasksDir, 'project rm house', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    // The parked instruction must carry title = 'house' so the frontmatter fallback works.
+    expect(inst.title).toBe('house')
+    expect(inst.status).toBe('needs_confirmation')
+    // Confirm still completes correctly (covers the normal path, which uses pending.status first)
+    await engine.confirm(id)
+    expect(projects.removed).toEqual(['house'])
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('done')
+  })
+  it('project_rm confirm guards setStatus with existsSync when removing the active project trashes the instruction file', async () => {
+    // When the active project is removed, ProjectOps.remove() switches to default then trashes
+    // the project dir — which contains the instruction file. Subsequent setStatus must not throw.
+    const projects = fakeProjects()
+    // Override remove to trash the instruction file (simulate active-project removal)
+    let instructionPath = ''
+    projects.remove = async (_n: string) => {
+      // trash the instruction file to simulate it being moved away
+      if (instructionPath && existsSync(instructionPath)) {
+        const { mkdirSync: mkdir, renameSync: rename } = await import('fs')
+        const trashDir = join(tasksDir, '..', '.trash')
+        mkdir(trashDir, { recursive: true })
+        rename(instructionPath, join(trashDir, 'moved.md'))
+      }
+    }
+    const { tasksDir, engine } = setup([], projects)
+    const id = writeInstruction(tasksDir, 'project rm house', new Date('2026-10-02T10:00:00'))
+    instructionPath = qpath(tasksDir, id)
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('needs_confirmation')
+    // Confirm must resolve without throwing even though the file was moved away
+    await expect(engine.confirm(id)).resolves.not.toThrow()
+    // File was moved — no instruction at original path
+    expect(existsSync(qpath(tasksDir, id))).toBe(false)
+  })
+  it('a failing project op parks with the real error', async () => {
+    const projects = fakeProjects()
+    projects.switch = async () => {
+      throw new Error('unknown project "ghost" — have: default, house')
+    }
+    const { tasksDir, engine } = setup([], projects)
+    const id = writeInstruction(tasksDir, 'project ghost', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('attention')
+    expect(inst.error).toMatch(/unknown project "ghost"/)
   })
 })

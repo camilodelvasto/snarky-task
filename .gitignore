@@ -9,9 +9,8 @@ persona.db
 persona.db-*
 .superpowers/
 .astro/
-workspace/tasks/queue/*
-workspace/tasks/cards/*
-workspace/tasks/artifacts/*
-workspace/tasks/history/*
-!workspace/tasks/**/.gitkeep
+workspace/projects/
+workspace/current
+workspace/.trash/
+!workspace/templates/
 models/

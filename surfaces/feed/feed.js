@@ -126,6 +126,7 @@ function drawerHtml(i) {
       ${i.card ? kv('card', `#${esc(i.card)}${i.pick ? ` <span class="pick">← ${esc((i.engine ?? '').replace(/^cli\+/, '') || 'resolver')} ${Number(i.pick).toFixed(2)}</span>` : ''}`) : ''}
       ${kv('instruction', `<span class="raw-full">${esc(i.raw)}</span>`, ' wide')}
       ${i.error ? kv('error', `<span class="err-v">${esc(i.error)}</span>`, ' wide') : ''}
+      ${i.result ? kv('result', `<span class="result-v">${esc(i.result)}</span>`, ' wide') : ''}
       ${blockedBy ? kv('blocked', `<span class="err-v">waiting — resolve the attention on #${esc(i.card)} first (${esc(timeOf(blockedBy.id))})</span>`, ' wide') : ''}
     </div>`
 }
@@ -161,10 +162,37 @@ function rowHtml(i) {
  * @param {Object} snapshot
  * @returns {void}
  */
+let byePending = false
+
 function render(snapshot) {
   // Don't clobber an active inline edit — the next snapshot update will catch up.
   if (document.activeElement && document.activeElement.classList.contains('edit-input')) return
   lastSnapshot = snapshot
+  // Graceful exit: rows leaving the DOM (auto-swept, cleaned, cleared) fade
+  // and collapse for one beat before the re-render removes them.
+  const nextIds = new Set(
+    snapshot.instructions.map((i) => i.id).concat(histOpen ? histData.map((i) => i.id) : [])
+  )
+  const leaving = [...document.querySelectorAll('.row[data-id]')].filter(
+    (el) => !nextIds.has(el.dataset.id) && !el.classList.contains('bye')
+  )
+  if (leaving.length && !byePending) {
+    byePending = true
+    for (const el of leaving) {
+      const targets = [el]
+      if (el.nextElementSibling?.classList.contains('drawer')) targets.push(el.nextElementSibling)
+      for (const t of targets) {
+        t.style.maxHeight = `${t.offsetHeight}px`
+        void t.offsetHeight // commit the start height before transitioning
+        t.classList.add('bye')
+      }
+    }
+    setTimeout(() => {
+      byePending = false
+      render(lastSnapshot)
+    }, 330)
+    return
+  }
   cards = snapshot.cards
   lastInstructions = snapshot.instructions
   const open = snapshot.instructions.filter((i) => i.status !== 'done')
@@ -325,8 +353,12 @@ function autogrow() {
 //   $word  at end         → status completions
 //   @word  at end         → collaborator completions
 //   #word  at end         → card shortname completions (original behaviour)
+//   project / /project    → subcommand + name completions
+// acTrigger tracks which trigger fired so acceptHit branches on that, not the input text.
 let acHits = []
 let acSel = 0
+/** @type {'verb'|'status'|'collab'|'card'|'proj'|null} */
+let acTrigger = null
 
 // Static verb list — insert adds a trailing space so the user keeps typing.
 // Aliases shown in the hint string.
@@ -343,6 +375,10 @@ const AC_VERBS = [
   { insert: 'link ', label: '/link', hint: '<#card> <#card>' },
   { insert: 'delete ', label: '/delete', hint: 'del, rm — <#card>' },
   { insert: 'delegate ', label: '/delegate', hint: '<#card> @collab [text]' },
+  { insert: 'open ', label: '/open', hint: 'expand — <#card> opens it on the board' },
+  { insert: 'rename ', label: '/rename', hint: '<#card> <new title> — slug follows' },
+  { insert: 'project ', label: '/project', hint: 'switch/new/rm — decks per concern' },
+  { insert: 'projects', label: '/projects', hint: 'list projects' },
   { insert: 'clean', label: '/clean', hint: 'sweep done rows into history' },
   { insert: 'clear', label: '/clear', hint: 'wipe history and done rows' }
 ]
@@ -374,15 +410,21 @@ function renderComplete() {
 /** Replace the matched tail in the input and close the menu. */
 function acceptHit(hit) {
   const val = input.value
-  // Determine which tail to replace based on what triggered this menu.
-  // /verb trigger: only fires when / is at index 0 — replace from index 0.
-  if (/^\/\w*$/.test(val)) {
+  // Branch on which trigger populated acHits, NOT on the current input text.
+  // Re-testing the text is unsafe: e.g. `project something #card` would
+  // match the proj pattern while the card trigger is active.
+  if (acTrigger === 'verb') {
+    // /word at position 0 — replace the whole input.
+    input.value = hit.insert
+  } else if (acTrigger === 'proj') {
+    // Project sub-completion: hit.insert is the full replacement line.
     input.value = hit.insert
   } else {
-    // Replace the last $word, @word, or #word tail.
+    // 'status', 'collab', 'card' — replace the last $word, @word, or #word tail.
     input.value = val.replace(/[$@#][a-z0-9-]*$/i, hit.insert)
   }
   acHits = []
+  acTrigger = null
   complete.hidden = true
   autogrow()
   input.focus()
@@ -402,21 +444,28 @@ input.addEventListener('keydown', (e) => {
       renderComplete()
       return
     }
-    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
-      // Enter selects the highlighted option while the menu is open — it only
-      // submits the instruction when no menu is showing.
+    if (e.key === 'Tab') {
+      // Tab is the ONLY accept key. Enter always submits (below), even with the
+      // menu open — so a new value that happens to share a prefix with an
+      // existing card (`#private` vs card `#private-keys`) can be committed
+      // without being hijacked into the suggestion.
       e.preventDefault()
       acceptHit(acHits[acSel])
       return
     }
     if (e.key === 'Escape') {
       acHits = []
+      acTrigger = null
       complete.hidden = true
       return
     }
   }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
+    // Submitting dismisses any open suggestion menu — it was only a hint.
+    acHits = []
+    acTrigger = null
+    complete.hidden = true
     form.requestSubmit()
     return
   }
@@ -460,6 +509,7 @@ input.addEventListener('input', () => {
     const prefix = val.slice(1).toLowerCase()
     acHits = AC_VERBS.filter((v) => v.label.slice(1).startsWith(prefix))
     acSel = 0
+    acTrigger = 'verb'
     renderComplete()
     return
   }
@@ -470,6 +520,7 @@ input.addEventListener('input', () => {
     const prefix = mStatus[1].toLowerCase()
     acHits = AC_STATUSES.filter((s) => s.label.slice(1).startsWith(prefix))
     acSel = 0
+    acTrigger = 'status'
     renderComplete()
     return
   }
@@ -480,6 +531,7 @@ input.addEventListener('input', () => {
     const prefix = mCollab[1].toLowerCase()
     acHits = AC_COLLABS.filter((c) => c.label.slice(1).startsWith(prefix))
     acSel = 0
+    acTrigger = 'collab'
     renderComplete()
     return
   }
@@ -488,16 +540,64 @@ input.addEventListener('input', () => {
   const mCard = val.match(/#([a-z0-9-]*)$/i)
   if (mCard) {
     const prefix = mCard[1].toLowerCase()
+    // Only live cards — never suggest archived (done/dropped) ones.
     acHits = cards
+      .filter((c) => c.status !== 'done' && c.status !== 'dropped')
       .filter((c) => c.shortname.startsWith(prefix))
       .slice(0, 6)
       .map((c) => ({ insert: '#' + c.shortname + ' ', label: '#' + c.shortname, hint: c.title }))
     acSel = 0
+    acTrigger = 'card'
     renderComplete()
     return
   }
 
+  // Project trigger: "project " or "/project " at the start — offer subcommands,
+  // project names, and (after "new <name> from ") template names.
+  const mProj = val.match(/^\/?(project\s+)(.*)/i)
+  if (mProj) {
+    const tail = mProj[2]
+    const proj = lastSnapshot.project
+    // "new <name> from <prefix>" — offer template names
+    const mFrom = tail.match(/^new\s+\S+\s+from\s+(\S*)$/i)
+    if (mFrom) {
+      const prefix = mFrom[1].toLowerCase()
+      const templates = proj?.templates ?? []
+      acHits = templates
+        .filter((t) => t.startsWith(prefix))
+        .map((t) => ({ insert: val.replace(/\S*$/, t + ' '), label: t, hint: 'template' }))
+      acSel = 0
+      acTrigger = 'proj'
+      renderComplete()
+      return
+    }
+    // "new <prefix>" — no further completions here (name is free-form)
+    // project names: offer matching names after "project <prefix>"
+    const mName = tail.match(/^([a-z0-9-]*)$/i)
+    if (mName) {
+      const prefix = mName[1].toLowerCase()
+      const names = proj?.list ?? []
+      const subCmds = [
+        { insert: val.replace(/\S*$/, 'new '), label: 'new', hint: 'create a project' },
+        { insert: val.replace(/\S*$/, 'rm '), label: 'rm', hint: 'remove a project' }
+      ].filter((s) => s.label.startsWith(prefix))
+      const nameHits = names
+        .filter((n) => n.startsWith(prefix))
+        .map((n) => ({ insert: val.replace(/\S*$/, n + ' '), label: n, hint: 'switch to project' }))
+      acHits = [...subCmds, ...nameHits]
+      acSel = 0
+      acTrigger = 'proj'
+      renderComplete()
+      return
+    }
+    acHits = []
+    acTrigger = null
+    complete.hidden = true
+    return
+  }
+
   acHits = []
+  acTrigger = null
   complete.hidden = true
 })
 
