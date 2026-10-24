@@ -3,7 +3,12 @@ import { readFileSync, writeFileSync, renameSync, appendFileSync, mkdirSync } fr
 import { join, basename, dirname } from 'path'
 import { randomBytes } from 'crypto'
 import type { Card, Instruction } from './types'
+import type { Element } from './elements/types'
 import { validateCard, validateInstruction, formatErrors } from './validate'
+import { BUNDLED } from './elements/registry'
+import { bodyToElements, elementsToBody } from './elements/serialize'
+import { mintId } from './elements/id'
+import { migrateV1 } from './elements/migrate'
 
 export function writeFileAtomic(path: string, data: string): void {
   // The parent dir may be missing on a synced workspace (Syncthing drops empty
@@ -143,16 +148,76 @@ export function patchInstruction(
   writeFileAtomic(path, matter.stringify(content, merged))
 }
 
-const LOG_HEADER = '## Log'
-const NOTES_HEADER = '## Notes'
+/**
+ * writeCard input type: accepts full Card (with elements/id) or legacy callers
+ * that only provide description/notes/log. The reconcile step in writeCard
+ * merges legacy fields into elements so all existing handlers work unchanged.
+ *
+ * notes/elements/id are all optional: legacy callers omit them and the reconcile
+ * builds elements purely from description/notes/log; callers that carry elements
+ * (spread from readCard) can pass them through.
+ */
+export type WriteCardInput = Omit<Card, 'path' | 'artifacts' | 'elements' | 'id' | 'notes'> & {
+  notes?: string[]
+  /** If provided, used as source of truth; legacy description/notes/log are reconciled in. */
+  elements?: Element[]
+  /** If provided, written to frontmatter; otherwise a new id is minted. */
+  id?: string
+}
 
-export function writeCard(
-  tasksDir: string,
-  card: Omit<Card, 'path' | 'artifacts' | 'notes'> & { notes?: string[] }
-): string {
+export function writeCard(tasksDir: string, card: WriteCardInput): string {
   const path = join(tasksDir, 'cards', `${card.shortname}.md`)
-  const front = {
-    v: 1,
+
+  // Mint a stable id if not already present.
+  const cardId = card.id || mintId('c', new Set<string>())
+
+  // ── Reconcile legacy fields into elements ─────────────────────────────────
+  // Elements are the source of truth. When handlers spread `{...existing, log: [...old.log, line]}`
+  // the existing elements already represent old.log; only the new line is appended.
+  // When callers pass only legacy fields (no card.elements), we build elements from scratch.
+  const workingElements: Element[] = card.elements ? [...card.elements] : []
+  const takenIds = new Set<string>(workingElements.map((e) => e.id))
+
+  // description → text (lead) element
+  // Elements are authoritative: ONLY create a lead text element when none exists AND
+  // the legacy description is non-empty. Never overwrite an existing text element —
+  // callers that want to update the lead use applyOp('text','edit',…) directly.
+  const existingTextEl = workingElements.find((e) => e.type === 'text')
+  if (!existingTextEl && card.description !== '') {
+    const id = 'lead'
+    takenIds.add(id)
+    workingElements.unshift({ id, type: 'text', data: { text: card.description } })
+  }
+
+  // notes → note elements
+  // Legacy `notes` path removed: no current caller passes a legacy notes array.
+  // handleNote uses applyOp; handleCreate never sets notes. Note elements come
+  // solely from card.elements — the dedup-by-text path that silently collapsed
+  // identical note texts is gone with this removal.
+
+  // log → log elements
+  // Log element id IS the content line (content-identity). For each log line not already
+  // present as a log element (checked by id === line), append a new log element.
+  const existingLogIds = new Set<string>(
+    workingElements.filter((e) => e.type === 'log').map((e) => e.id)
+  )
+  for (const logLine of card.log) {
+    if (!existingLogIds.has(logLine)) {
+      existingLogIds.add(logLine)
+      workingElements.push({ id: logLine, type: 'log', data: { line: logLine } })
+    }
+  }
+
+  // ── Build frontmatter and body ─────────────────────────────────────────────
+  // Only body-storage elements are serialized (fs elements like output are read-only).
+  const bodyElements = workingElements.filter((e) => {
+    const shape = BUNDLED[e.type]
+    return shape && shape.storage === 'body'
+  })
+
+  const front: Record<string, unknown> = {
+    v: 2,
+    id: cardId,
     title: card.title,
     status: card.status,
     created: card.created,
@@ -162,57 +227,138 @@ export function writeCard(
   }
   const errs = validateCard(front)
   if (errs.length) throw new Error(`card "${card.shortname}" invalid: ${formatErrors(errs)}`)
-  // Sections, in order: description, user notes (omitted when empty), system log.
-  // The log is ALWAYS last so appendLog can append a line to EOF and land in it.
-  const notes = card.notes ?? []
-  const notesBlock = notes.length
-    ? `${NOTES_HEADER}\n${notes.map((l) => `- ${l}`).join('\n')}\n\n`
-    : ''
-  const body = `\n${card.description}\n\n${notesBlock}${LOG_HEADER}\n${card.log.map((l) => `- ${l}`).join('\n')}\n`
+
+  // elementsToBody always emits `## Log` last (even with zero log elements),
+  // so appendLog always lands inside it.
+  const body = '\n' + elementsToBody(bodyElements, BUNDLED) + '\n'
   writeFileAtomic(path, matter.stringify(body, front))
   return path
 }
 
-/** Parse the `- ` bullet lines out of one card-body section. */
-function bulletLines(section: string): string[] {
-  return section
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.startsWith('- '))
-    .map((l) => l.slice(2))
-}
-
-/** Split on a header that occupies a whole line (line-anchored). */
-function splitSection(text: string, header: string): [string, string | undefined] {
-  const m = text.match(new RegExp(`^${header.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm'))
-  if (!m || m.index === undefined) return [text, undefined]
-  return [text.slice(0, m.index), text.slice(m.index + m[0].length)]
-}
-
 export function readCard(path: string): Card {
   const { data, content } = matter(readFileSync(path, 'utf-8'))
+
+  const shortname = basename(path, '.md')
+  // tasksDir = dirname of 'cards/' = dirname(dirname(path))
+  const tasksDir = dirname(dirname(path))
+
+  const rawVersion = (data as { v?: number })?.v ?? 1
+
+  // ── v1 lazy migration (in-memory only — file is NOT rewritten) ────────────
+  if (rawVersion === 1) {
+    // Normalize the frontmatter for v1 validation: gray-matter parses bare date
+    // strings (e.g. `created: 2026-10-01`) as Date objects. Coerce them back to
+    // strings so the v1 JSON Schema (which requires `"type": "string"`) passes.
+    const normalizedData: Record<string, unknown> = { ...data }
+    if (normalizedData.created instanceof Date) {
+      normalizedData.created = (normalizedData.created as Date).toISOString().slice(0, 10)
+    }
+    if (normalizedData.due instanceof Date) {
+      normalizedData.due = (normalizedData.due as Date).toISOString().slice(0, 10)
+    }
+    const v1Errs = validateCard(normalizedData)
+    if (v1Errs.length) {
+      throw new Error(`${path} invalid against card.v1.json: ${formatErrors(v1Errs)}`)
+    }
+    const { front, elements: bodyElements } = migrateV1(data as Record<string, unknown>, content, BUNDLED)
+
+    // Append fs-storage elements (e.g. output/artifacts) via their materialize() hooks
+    const fsElements: Element[] = []
+    for (const [, shape] of Object.entries(BUNDLED)) {
+      if (shape.storage === 'fs' && shape.materialize) {
+        fsElements.push(...shape.materialize(tasksDir, shortname))
+      }
+    }
+
+    const elements: Element[] = [...bodyElements, ...fsElements]
+
+    const textEl = elements.find((e) => e.type === 'text')
+    const description = textEl ? (textEl.data.text as string).trim() : ''
+    const notes = elements.filter((e) => e.type === 'note').map((e) => e.data.text as string)
+    const log = elements.filter((e) => e.type === 'log').map((e) => e.data.line as string)
+    const artifacts = elements.filter((e) => e.type === 'output').map((e) => e.data.file as string)
+
+    return {
+      shortname,
+      path,
+      id: front.id as string,
+      title: front.title as string,
+      status: front.status as import('./types').CardStatus,
+      created: front.created as string,
+      due: front.due ? String(front.due) : undefined,
+      links: (front.links as string[]) ?? [],
+      labels: (front.labels as string[]) ?? [],
+      elements,
+      description,
+      notes,
+      log,
+      artifacts
+    }
+  }
+
+  // ── v2 path (existing behavior) ───────────────────────────────────────────
   const errs = validateCard(data)
-  if (errs.length) throw new Error(`${path} invalid against card.v1.json: ${formatErrors(errs)}`)
-  const [beforeLog, logPart] = splitSection(content, LOG_HEADER)
-  const [desc, notesPart] = splitSection(beforeLog, NOTES_HEADER)
-  const notes = bulletLines(notesPart ?? '')
-  const log = bulletLines(logPart ?? '')
+  if (errs.length) {
+    throw new Error(`${path} invalid against card.v${rawVersion}.json: ${formatErrors(errs)}`)
+  }
+
+  // Parse body into elements using BUNDLED shapes (serialization must not depend on elements.json)
+  const bodyElements = bodyToElements(content, BUNDLED)
+
+  // Append fs-storage elements (e.g. output/artifacts) via their materialize() hooks
+  const fsElements: Element[] = []
+  for (const [, shape] of Object.entries(BUNDLED)) {
+    if (shape.storage === 'fs' && shape.materialize) {
+      fsElements.push(...shape.materialize(tasksDir, shortname))
+    }
+  }
+
+  const elements: Element[] = [...bodyElements, ...fsElements]
+
+  // ── Derive legacy fields from elements ────────────────────────────────────
+  // description = lead text element's data.text, trimmed, or ''
+  // trimEnd() in textShape.parse may leave a leading newline from the body layout;
+  // trim() here ensures the derived field is clean (matches original readCard behaviour).
+  const textEl = elements.find((e) => e.type === 'text')
+  const description = textEl ? (textEl.data.text as string).trim() : ''
+
+  // notes = note elements' data.text (in order)
+  const notes = elements.filter((e) => e.type === 'note').map((e) => e.data.text as string)
+
+  // log = log elements' data.line (in order)
+  const log = elements.filter((e) => e.type === 'log').map((e) => e.data.line as string)
+
+  // artifacts = output elements' data.file (in order)
+  const artifacts = elements.filter((e) => e.type === 'output').map((e) => e.data.file as string)
+
+  // card id: from frontmatter (v:2) or fall back to shortname for legacy v:1 cards
+  const cardId: string = (data as { id?: string }).id ?? shortname
+
   return {
-    shortname: basename(path, '.md'),
+    shortname,
     path,
-    title: data.title,
-    status: data.status,
+    id: cardId,
+    title: data.title as string,
+    status: data.status as import('./types').CardStatus,
     created: String(data.created),
     due: data.due ? String(data.due) : undefined,
-    links: data.links ?? [],
-    labels: data.labels ?? [],
-    description: desc.trim(),
+    links: (data.links as string[]) ?? [],
+    labels: (data.labels as string[]) ?? [],
+    elements,
+    description,
     notes,
     log,
-    artifacts: [] // populated by readSnapshot via listArtifacts
+    artifacts
   }
 }
 
+/**
+ * Cheap EOF append of a single log line. The `## Log` section is always the
+ * last block in every v:2 card body (guaranteed by elementsToBody), so this
+ * blind append always lands inside it. On re-read, bodyToElements parses it as
+ * a log element whose id equals the line content (content-identity, stable
+ * across devices — diffCard dedup relies on this).
+ */
 export function appendLog(cardPath: string, line: string): void {
   appendFileSync(cardPath, `- ${line}\n`)
 }

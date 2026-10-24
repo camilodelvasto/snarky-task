@@ -12,6 +12,9 @@ import {
   readCard,
   appendLog
 } from '../tasks/files'
+import { mintId } from '../tasks/elements/id'
+import { applyOp } from '../tasks/elements/ops'
+import { BUNDLED } from '../tasks/elements/registry'
 
 function freshTasksDir(): string {
   const dir = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
@@ -111,6 +114,7 @@ describe('card files', () => {
   })
   it('keeps notes and the system log in separate sections; appendLog still lands in ## Log', () => {
     const dir = freshTasksDir()
+    // Use explicit elements (legacy notes reconcile removed); note elements come solely from elements.
     const path = writeCard(dir, {
       shortname: 'keys',
       title: 'keys',
@@ -119,12 +123,15 @@ describe('card files', () => {
       links: [],
       labels: [],
       description: 'desc',
-      notes: ['2026-10-19 22:17 — aws_id:abc123'],
-      log: ['2026-10-19 22:16 — created']
-    })
+      log: ['2026-10-19 22:16 — created'],
+      elements: [
+        { id: 'lead', type: 'text', data: { text: 'desc' } },
+        { id: 'n1', type: 'note', data: { at: '2026-10-19 22:17', text: 'aws_id:abc123' } }
+      ]
+    } as never)
     appendLog(path, '2026-10-19 22:20 — status → done')
     const card = readCard(path)
-    expect(card.notes).toEqual(['2026-10-19 22:17 — aws_id:abc123'])
+    expect(card.notes).toEqual(['aws_id:abc123'])
     expect(card.log).toEqual(['2026-10-19 22:16 — created', '2026-10-19 22:20 — status → done'])
     const raw = readFileSync(path, 'utf-8')
     expect(raw).toContain('## Notes')
@@ -157,8 +164,8 @@ describe('slugify length', () => {
   })
 })
 
-describe('v:1 stamping, validation, atomic writes', () => {
-  it('writeCard stamps v:1 and the frontmatter validates', () => {
+describe('v:2 stamping, validation, atomic writes', () => {
+  it('writeCard stamps v:2, mints an id, and the frontmatter validates', () => {
     const dir = freshTasksDir()
     const path = writeCard(dir, {
       shortname: 'c',
@@ -171,7 +178,8 @@ describe('v:1 stamping, validation, atomic writes', () => {
       log: []
     })
     const raw = readFileSync(path, 'utf-8')
-    expect(raw).toMatch(/^v: 1$/m)
+    expect(raw).toMatch(/^v: 2$/m)
+    expect(raw).toMatch(/^id: /m)
     expect(() => readCard(path)).not.toThrow()
   })
   it('readCard throws a precise error on a schema-invalid card', () => {
@@ -252,5 +260,121 @@ describe('writeInstruction on a missing queue dir (synced workspace)', () => {
     // deliberately do NOT create queue/ — simulate a Syncthing-dropped empty dir
     expect(() => writeInstruction(dir, 'hello', new Date('2026-10-02T10:00:00'))).not.toThrow()
     expect(readdirSync(join(dir, 'queue')).some((f) => f.endsWith('.md'))).toBe(true)
+  })
+})
+
+// ─── Task 9: element-based card round-trip ──────────────────────────────────
+describe('v:2 element-based card round-trip', () => {
+  it('writes a card from elements, reads back with equal elements and correct derived fields', () => {
+    const tasksDir = freshTasksDir()
+    const taken = new Set<string>()
+    const leadId = mintId('t', taken)
+    taken.add(leadId)
+    const note1Id = mintId('n', taken)
+    taken.add(note1Id)
+    const note2Id = mintId('n', taken)
+    taken.add(note2Id)
+    const elements = [
+      { id: leadId, type: 'text', data: { text: 'This is the description' } },
+      { id: note1Id, type: 'note', data: { at: '2026-10-22 10:00', text: 'first note' } },
+      { id: note2Id, type: 'note', data: { at: '2026-10-22 10:01', text: 'second note' } }
+    ]
+    const path = writeCard(tasksDir, {
+      shortname: 'elem-card',
+      title: 'Element Card',
+      status: 'inbox',
+      created: '2026-10-22',
+      links: [],
+      labels: [],
+      description: '',
+      log: [],
+      elements
+    } as never)
+    const raw = readFileSync(path, 'utf-8')
+    // v:2 frontmatter
+    expect(raw).toMatch(/^v: 2$/m)
+    // id is present
+    expect(raw).toMatch(/^id: /m)
+    const card = readCard(path)
+    // elements round-trip
+    const textEls = card.elements.filter((e) => e.type === 'text')
+    const noteEls = card.elements.filter((e) => e.type === 'note')
+    expect(textEls).toHaveLength(1)
+    expect(noteEls).toHaveLength(2)
+    // derived description = lead text element's text
+    expect(card.description).toBe('This is the description')
+    // derived notes = note elements' data.text
+    expect(card.notes).toEqual(['first note', 'second note'])
+    // stable id was minted
+    expect(typeof card.id).toBe('string')
+    expect(card.id.length).toBeGreaterThan(0)
+  })
+
+  it('appendLog then readCard: line appears in derived log and log element id equals its content', () => {
+    const tasksDir = freshTasksDir()
+    const path = writeCard(tasksDir, {
+      shortname: 'logcard',
+      title: 'Log Card',
+      status: 'inbox',
+      created: '2026-10-22',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    const logLine = '2026-10-22 10:00 — created'
+    appendLog(path, logLine)
+    const card = readCard(path)
+    // line appears in derived log
+    expect(card.log).toContain(logLine)
+    // log element id equals content (content-identity, used by diffCard dedup)
+    const logEls = card.elements.filter((e) => e.type === 'log')
+    const matchingLogEl = logEls.find((e) => e.id === logLine)
+    expect(matchingLogEl).toBeDefined()
+  })
+
+  it('a card with no elements writes a valid empty-body card (just ## Log) and reads back with empty derived fields', () => {
+    const tasksDir = freshTasksDir()
+    const path = writeCard(tasksDir, {
+      shortname: 'empty-elem',
+      title: 'Empty Card',
+      status: 'inbox',
+      created: '2026-10-22',
+      links: [],
+      labels: [],
+      description: '',
+      log: [],
+      elements: []
+    } as never)
+    const raw = readFileSync(path, 'utf-8')
+    expect(raw).toContain('## Log')
+    expect(raw).toMatch(/^v: 2$/m)
+    const card = readCard(path)
+    expect(card.description).toBe('')
+    expect(card.notes).toEqual([])
+    expect(card.log).toEqual([])
+    expect(card.elements.filter((e) => e.type !== 'output')).toEqual([])
+  })
+
+  it('editing the lead text element to "" yields an empty description (empty description is representable)', () => {
+    const tasksDir = freshTasksDir()
+    // Write a card with a description
+    const path = writeCard(tasksDir, {
+      shortname: 'desc-card',
+      title: 'Desc Card',
+      status: 'inbox',
+      created: '2026-10-22',
+      links: [],
+      labels: [],
+      description: 'original body',
+      log: []
+    })
+    const existing = readCard(path)
+    // applyOp to set lead text to ''
+    const updated = applyOp(existing.elements, 'text', 'edit', { text: '' }, BUNDLED)
+    writeCard(tasksDir, { ...existing, elements: updated })
+    const card = readCard(path)
+    // description derived from lead element must be '' (not the original 'original body')
+    expect(card.description).toBe('')
   })
 })

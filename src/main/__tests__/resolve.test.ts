@@ -6,12 +6,14 @@ import type { Choice, Resolver } from '../capabilities/contracts'
 
 const card = (shortname: string, title: string, created = '2026-10-01'): Card => ({
   shortname,
+  id: shortname,
   title,
   created,
   path: '',
   status: 'inbox',
   links: [],
   labels: [],
+  elements: [],
   description: '',
   notes: [],
   log: [],

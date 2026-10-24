@@ -579,58 +579,165 @@ body {
   color: var(--ink-3);
 }
 
-/* ── Activity ─────────────────────────────────────────────────────────────── */
-.editor-activity {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.editor-log-line {
-  color: var(--ink-2);
-}
-
-/* User notes — card content, firmer than the system activity log */
-.editor-notes {
-  margin: 10px 0 2px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.editor-note-line {
-  font: 400 14px/1.6 lato, sans-serif;
-  color: var(--ink);
-  padding-left: 11px;
+/* ── Notes (v5) — content, regular-weight Garamond; the card's substance ───── */
+.editor-note {
+  position: relative;
+  padding: 3px 0 3px 10px; /* the bar is back; tight — it adds a left edge, not height */
   border-left: 2px solid var(--hairline);
 }
+.editor-note:hover { border-left-color: #ecd2d9; }
+.editor-note-text {
+  font: 400 17px/1.42 garamond, serif; /* regular weight, slightly tighter leading */
+  color: var(--ink);
+  outline: none;
+  border-radius: 5px;
+  caret-color: var(--accent);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.editor-note.scratched .editor-note-text {
+  color: var(--ink-4);
+  text-decoration: line-through;
+  text-decoration-color: var(--hairline);
+}
+.editor-note-foot {
+  margin-top: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+.editor-note-time {
+  font: var(--mono);
+  letter-spacing: 0.05em;
+  color: var(--ink-4);
+}
+.editor-note-acts {
+  margin-left: 14px; /* beside the date, not right-aligned */
+  font: var(--mono);
+  letter-spacing: 0.05em;
+  color: var(--ink-4);
+  opacity: 0; /* revealed on hover — instantly, no fade (see below) */
+}
+.editor-note:hover .editor-note-acts,
+.editor-note.scratched .editor-note-acts { opacity: 1; }
+.editor-note.editing .editor-note-acts { opacity: 1; }
+.editor-note-act {
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.editor-note-act:hover { color: var(--accent); }
+.editor-note-sep { color: var(--ink-4); }
+/* inline edit state (double-click) — the accent ring on the field IS the indicator
+   now that there's no bar */
+.editor-note.editing .editor-note-text {
+  border: var(--border-field);
+  box-shadow: 0 0 0 2px var(--accent);
+  padding: 7px 10px;
+  margin: -1px -10px 0;
+}
 
-.editor-more-btn {
+/* ── Unified content sections — ▸ name · N   write a X ─────────────────────────
+   One pattern for notes / dates / people / output / activity. The whole header
+   row toggles (the write button carves itself out); state persists per card. */
+.editor-sec { margin-top: 14px; }
+.editor-sec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font: var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  padding: 5px 0 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.editor-sec-head:hover .editor-sec-arrow,
+.editor-sec-head:hover .editor-sec-name { color: var(--ink); }
+.editor-sec-arrow { width: 9px; color: var(--ink-4); transition: color var(--dur) var(--ease); }
+.editor-sec-name { transition: color var(--dur) var(--ease); } /* lowercase — no transform */
+.editor-sec-count { color: var(--ink-4); }
+.editor-sec-write {
+  margin-left: auto;
   background: none;
   border: none;
   cursor: pointer;
-  color: var(--ink-3);
+  color: var(--ink-4);
+  font: var(--mono);
+  letter-spacing: 0.06em;
   padding: 0;
-  font: var(--mono);
-  letter-spacing: 0.05em;
-  margin-top: 4px;
-  text-align: left;
 }
-.editor-more-btn:hover { color: var(--ink); }
+.editor-sec-write:hover { color: var(--accent); }
+.editor-sec[data-collapsed="true"] .editor-sec-items { display: none; }
+/* outputs & activity start under the section NAME (past the arrow); notes carry
+   their own left bar at the content edge, so they opt out of that indent. */
+.editor-sec-items { display: flex; flex-direction: column; padding-left: 17px; }
+.editor-sec-items.notes { padding-left: 0; gap: 3px; } /* bar is the left edge; gap keeps bars apart */
+.editor-sec-items.log { gap: 1px; } /* outputs & activity share the · separator */
 
-/* ── Artifacts ────────────────────────────────────────────────────────────── */
-.editor-artifacts {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+/* Dates / People — quiet rows under their section header */
+.editor-el-row {
+  font: 400 14px/1.5 lato, sans-serif;
+  color: var(--ink-2);
+  padding: 3px 0;
 }
 
-.editor-artifact-row {
+/* ── Outputs — datetime-led lines with an inline preview; body opens below ──── */
+/* Fonts come from the type tokens (t-meta / t-body) in the markup; here only
+   position + color. Every child shares --lh-row, so the row keeps one height
+   whether or not the preview is shown — the datetime + actions never jump. */
+/* align-items:center, NOT baseline: the datetime (mono) and preview (lato) are
+   different font sizes, and baseline alignment positions them by font ascent — so
+   when the preview is hidden on expand the datetime baseline moves (the jump). With
+   every child on the same --lh-row line box, centering keeps the datetime's vertical
+   position identical whether or not the preview is shown. */
+.editor-out-head { display: flex; align-items: center; gap: 6px; padding: 3px 0; cursor: pointer; }
+/* dates are always the same light gray + size everywhere (match the note timestamp) */
+.editor-out-time { line-height: var(--lh-row); color: var(--ink-4); white-space: nowrap; }
+.editor-out-preview {
+  line-height: var(--lh-row);
   color: var(--ink-3);
-  font: var(--mono);
-  letter-spacing: 0.05em;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.editor-out-acts {
+  line-height: var(--lh-row);
+  margin-left: auto; /* hold the right border whether or not the preview is shown */
+  color: var(--ink-4);
+  opacity: 0; /* revealed on hover instantly, no fade */
+  white-space: nowrap;
+}
+.editor-mid-dot { line-height: var(--lh-row); color: var(--ink-4); }
+/* Dates + controls are not prose: never selectable (the open-card's text-select
+   rule outspecifies a bare class, so scope these), and every control shows the
+   pointer. Only genuine text — note bodies, output bodies, description — selects. */
+[data-open-card] .editor-out-head,
+[data-open-card] .editor-sec-head,
+[data-open-card] .editor-note-time,
+[data-open-card] .editor-out-time,
+[data-open-card] .editor-log-time,
+[data-open-card] .editor-note-acts,
+[data-open-card] .editor-out-acts,
+[data-open-card] .editor-undo-act,
+[data-open-card] .editor-sec-write { user-select: none; }
+.editor-sec-write, .editor-undo-act { cursor: pointer; }
+.editor-out:hover .editor-out-acts { opacity: 1; }
+.editor-out-act { color: var(--ink-3); cursor: pointer; }
+.editor-out-act:hover { color: var(--accent); }
+.editor-out[data-collapsed="true"] .editor-out-body { display: none; }
+.editor-out[data-collapsed="false"] .editor-out-preview,
+.editor-out[data-collapsed="false"] .editor-mid-dot { display: none; }
+
+/* ── Activity — terse log lines; the latest drop surfaces an undo command here ──
+   Font from the t-meta token in the markup; here only the log's own color + rhythm. */
+.editor-log-line { color: var(--ink-4); line-height: var(--lh-row); }
+.editor-log-time { color: var(--ink-4); }
+.editor-log-line.undo { color: var(--ink-2); display: flex; gap: 8px; align-items: baseline; }
+.editor-undo-label::before { content: '↩ '; color: var(--accent); }
+.editor-undo-act { color: var(--accent); cursor: pointer; font-weight: 700; }
+.editor-undo-act:hover { text-decoration: underline; }
 
 /* ── Text actions ─────────────────────────────────────────────────────────── */
 .editor-actions {
@@ -652,9 +759,6 @@ body {
 }
 .editor-action:hover { color: var(--accent); }
 
-/* Artifact content — the delegation output, readable in place */
-.editor-artifact-row { background: none; border: none; cursor: pointer; text-align: left; padding: 2px 0; }
-.editor-artifact-row:hover { color: var(--ink); }
 /* Rendered markdown — the delegation output reads as a document on the card,
    not a nested grey panel: no box, no border, ink on white. Click to edit. */
 .artifact-md {
@@ -673,7 +777,7 @@ body {
 }
 /* empty output: a clear write-here prompt (clicking enters edit) */
 .artifact-md:empty::before {
-  content: 'Click to write markdown…';
+  content: 'click to write markdown…';
   color: var(--ink-4);
   pointer-events: none;
 }
@@ -772,16 +876,6 @@ body {
   background: var(--private);
   border-color: var(--private);
 }
-/* Author-an-output action — a plain text affordance, accent on hover. */
-.editor-add-output.editor-add-output {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--ink-3);
-  padding: 2px 0;
-  text-align: left;
-}
-.editor-add-output:hover { color: var(--accent); }
 .lbl-input {
   font: var(--mono); letter-spacing: 0.05em; color: var(--ink);
   background: var(--card); border: var(--border-field); border-radius: 4px;

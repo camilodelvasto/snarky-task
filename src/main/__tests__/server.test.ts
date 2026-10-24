@@ -15,8 +15,25 @@ const fakeEngine = {
   confirm: async () => undefined,
   reject: () => undefined,
   requeue: () => undefined,
-  getNav: () => undefined
+  getNav: () => undefined,
+  getOpenCard: () => fakeOpen,
+  setOpenCard: (c: string | null) => {
+    fakeOpen = c ?? undefined
+  },
+  applyElementOp: (shortname: string, type: string, op: string, args: unknown) => {
+    lastOp = { shortname, type, op, args }
+  },
+  dropOutput: async (shortname: string, file: string) => {
+    lastDrop = { shortname, file }
+  },
+  restoreLastDrop: (shortname: string) => {
+    lastRestore = shortname
+  }
 } as never
+let fakeOpen: string | undefined
+let lastOp: { shortname: string; type: string; op: string; args: unknown } | undefined
+let lastDrop: { shortname: string; file: string } | undefined
+let lastRestore: string | undefined
 
 const fakeProject = { current: 'default', list: ['default'], templates: [] }
 
@@ -84,6 +101,80 @@ describe('api', () => {
     const snap = await (await fetch(`${base}/api/state`)).json()
     expect(snap.cards.map((c: { shortname: string }) => c.shortname)).toContain('c1')
   })
+  it('a card description POST routes to the text.edit element op', async () => {
+    writeCard(tasksDir, {
+      shortname: 'desc-card',
+      title: 'D',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: 'old',
+      log: []
+    })
+    lastOp = undefined
+    const res = await fetch(`${base}/api/cards/desc-card`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: 'new body' })
+    })
+    expect(res.status).toBe(200)
+    expect(lastOp).toEqual({
+      shortname: 'desc-card',
+      type: 'text',
+      op: 'edit',
+      args: { id: undefined, text: 'new body' }
+    })
+  })
+  it('DELETE /api/artifacts/:card/:file delegates the recoverable drop to the engine', async () => {
+    const adir = join(tasksDir, 'artifacts', 'drop-card')
+    mkdirSync(adir, { recursive: true })
+    writeFileSync(join(adir, 'out.md'), 'content')
+    lastDrop = undefined
+    const res = await fetch(`${base}/api/artifacts/drop-card/out.md`, { method: 'DELETE' })
+    expect(res.status).toBe(200)
+    // The move-to-.trash + log + record happen in engine.dropOutput (engine-tested);
+    // the endpoint's job is to route the drop through it.
+    expect(lastDrop).toEqual({ shortname: 'drop-card', file: 'out.md' })
+  })
+  it('POST /api/cards/:shortname/restore undoes the last drop via the engine', async () => {
+    lastRestore = undefined
+    const res = await fetch(`${base}/api/cards/drop-card/restore`, { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(lastRestore).toBe('drop-card')
+  })
+  it('POST /api/open sets the open card and it shows in the snapshot; null clears it', async () => {
+    const set = await fetch(`${base}/api/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ card: 'camino-informe-colegios' })
+    })
+    expect(set.status).toBe(200)
+    let snap = await (await fetch(`${base}/api/state`)).json()
+    expect(snap.open).toBe('camino-informe-colegios')
+    await fetch(`${base}/api/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ card: null })
+    })
+    snap = await (await fetch(`${base}/api/state`)).json()
+    expect(snap.open).toBeUndefined()
+  })
+  it('POST /api/cards/:shortname/op dispatches an element op to the engine', async () => {
+    lastOp = undefined
+    const res = await fetch(`${base}/api/cards/decisiones/op`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'note', op: 'add', text: 'a new note' })
+    })
+    expect(res.status).toBe(200)
+    expect(lastOp).toEqual({
+      shortname: 'decisiones',
+      type: 'note',
+      op: 'add',
+      args: { id: undefined, text: 'a new note' }
+    })
+  })
   it('card POST title change reslugs: old file gone, new slug carries the title', async () => {
     writeCard(tasksDir, {
       shortname: 'x',
@@ -145,6 +236,8 @@ describe('api', () => {
     let calledWith = ''
     const spyEngine = {
       getNav: () => undefined,
+      getOpenCard: () => undefined,
+      setOpenCard: () => undefined,
       confirm: async () => undefined,
       reject: () => undefined,
       requeue: () => undefined,

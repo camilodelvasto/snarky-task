@@ -14,7 +14,8 @@ import {
   createProject,
   trashProject,
   ensureDefaultProject,
-  ensureProjectDirs
+  ensureProjectDirs,
+  syncBundledTemplates
 } from '../tasks/projects'
 import { writeCard, readCard } from '../tasks/files'
 
@@ -23,7 +24,9 @@ const now = new Date('2026-10-15T10:00:00Z')
 function root(): string {
   return mkdtempSync(join(tmpdir(), 'td-root-'))
 }
-/** A root with a default project carrying config+registry (the post-migration shape). */
+const ELEMENTS_STUB = JSON.stringify({ text: { schema: 'text.v1.json', lead: true, ops: ['edit'] } })
+
+/** A root with a default project carrying config+registry+elements (the post-migration shape). */
 function seeded(): string {
   const r = root()
   const t = join(r, 'projects', 'default', 'tasks')
@@ -31,6 +34,7 @@ function seeded(): string {
     mkdirSync(join(t, s), { recursive: true })
   writeFileSync(join(t, 'config.json'), '{"resolver":{"impl":"x"}}')
   writeFileSync(join(t, 'registry.json'), '{"create":{"class":"normal"}}')
+  writeFileSync(join(t, 'elements.json'), ELEMENTS_STUB)
   return r
 }
 
@@ -95,11 +99,12 @@ describe('projects fs library', () => {
     const defaultTasks = join(r, 'projects', 'default', 'tasks')
     for (const s of ['queue', 'cards', 'history', 'artifacts'])
       mkdirSync(join(defaultTasks, s), { recursive: true })
-    // templates/default has the config/registry
+    // templates/default has the config/registry/elements
     const tplDefault = join(r, 'templates', 'default')
     mkdirSync(tplDefault, { recursive: true })
     writeFileSync(join(tplDefault, 'config.json'), '{"resolver":{"impl":"tpl-default"}}')
     writeFileSync(join(tplDefault, 'registry.json'), '{"create":{"class":"normal"}}')
+    writeFileSync(join(tplDefault, 'elements.json'), ELEMENTS_STUB)
     createProject(r, 'house', now)
     const t = projectTasksDir(r, 'house')
     expect(JSON.parse(readFileSync(join(t, 'config.json'), 'utf-8')).resolver.impl).toBe(
@@ -158,11 +163,12 @@ describe('ensureDefaultProject', () => {
     const tasks = join(r, 'projects', 'default', 'tasks')
     for (const s of ['queue', 'cards', 'history', 'artifacts'])
       mkdirSync(join(tasks, s), { recursive: true })
-    // templates/default has the config/registry
+    // templates/default has the config/registry/elements
     const tplDefault = join(r, 'templates', 'default')
     mkdirSync(tplDefault, { recursive: true })
     writeFileSync(join(tplDefault, 'config.json'), '{"resolver":{"impl":"from-tpl"}}')
     writeFileSync(join(tplDefault, 'registry.json'), '{"create":{"class":"normal"}}')
+    writeFileSync(join(tplDefault, 'elements.json'), ELEMENTS_STUB)
     // config.json is absent — ensureDefaultProject must backfill it
     expect(existsSync(join(tasks, 'config.json'))).toBe(false)
     ensureDefaultProject(r)
@@ -178,6 +184,7 @@ describe('ensureDefaultProject', () => {
       mkdirSync(join(tasks, s), { recursive: true })
     writeFileSync(join(tasks, 'config.json'), '{"resolver":{"impl":"existing"}}')
     writeFileSync(join(tasks, 'registry.json'), '{"create":{"class":"normal"}}')
+    writeFileSync(join(tasks, 'elements.json'), ELEMENTS_STUB)
     const tplDefault = join(r, 'templates', 'default')
     mkdirSync(tplDefault, { recursive: true })
     writeFileSync(join(tplDefault, 'config.json'), '{"resolver":{"impl":"from-tpl"}}')
@@ -204,6 +211,7 @@ describe('ensureDefaultProject', () => {
     mkdirSync(tplDefault, { recursive: true })
     writeFileSync(join(tplDefault, 'config.json'), '{}')
     writeFileSync(join(tplDefault, 'registry.json'), '{}')
+    writeFileSync(join(tplDefault, 'elements.json'), ELEMENTS_STUB)
     ensureDefaultProject(r)
     for (const s of ['queue', 'cards', 'history', 'artifacts'])
       expect(existsSync(join(tasks, s))).toBe(true)
@@ -250,5 +258,102 @@ describe('resolveRoot', () => {
     expect(warn).toHaveBeenCalledOnce()
     warn.mockRestore()
     expect(resolveRoot('/app', undefined, '/no/such/cfg')).toBe(join('/app', 'workspace'))
+  })
+})
+
+describe('syncBundledTemplates', () => {
+  it('backfills a missing elements.json into an existing templates/default without overwriting existing files', () => {
+    const r = root()
+    // Simulate a pre-Task-7 workspace: templates/default exists with config + registry
+    // but lacks elements.json (the new file Task 7 introduced)
+    const tplDefault = join(r, 'templates', 'default')
+    mkdirSync(tplDefault, { recursive: true })
+    const SENTINEL_CONFIG = '{"sentinel":"pre-task7-config"}'
+    writeFileSync(join(tplDefault, 'config.json'), SENTINEL_CONFIG)
+    writeFileSync(join(tplDefault, 'registry.json'), '{"create":{"class":"normal"}}')
+    // elements.json is absent — this is the regression case
+
+    // appTemplatesDir has config + registry + elements.json
+    const appTpl = mkdtempSync(join(tmpdir(), 'app-tpl-'))
+    const appTplDefault = join(appTpl, 'default')
+    mkdirSync(appTplDefault, { recursive: true })
+    writeFileSync(join(appTplDefault, 'config.json'), '{"from":"bundled"}')
+    writeFileSync(join(appTplDefault, 'registry.json'), '{"create":{"class":"normal"}}')
+    writeFileSync(join(appTplDefault, 'elements.json'), ELEMENTS_STUB)
+
+    syncBundledTemplates(r, appTpl)
+
+    // elements.json must now exist (backfilled from bundled)
+    expect(existsSync(join(tplDefault, 'elements.json'))).toBe(true)
+    // config.json must NOT be overwritten (user's sentinel value preserved)
+    expect(readFileSync(join(tplDefault, 'config.json'), 'utf-8')).toBe(SENTINEL_CONFIG)
+    // registry.json must NOT be overwritten
+    expect(readFileSync(join(tplDefault, 'registry.json'), 'utf-8')).toContain('"create"')
+  })
+
+  it('copies the full bundle into a root with NO templates/ at all (default/elements.json present after)', () => {
+    const r = root()
+    // Root has no templates/ directory at all
+
+    const appTpl = mkdtempSync(join(tmpdir(), 'app-tpl-'))
+    const appTplDefault = join(appTpl, 'default')
+    mkdirSync(appTplDefault, { recursive: true })
+    writeFileSync(join(appTplDefault, 'config.json'), '{"resolver":{"impl":"ollama"}}')
+    writeFileSync(join(appTplDefault, 'registry.json'), '{"create":{"class":"normal"}}')
+    writeFileSync(join(appTplDefault, 'elements.json'), ELEMENTS_STUB)
+
+    expect(existsSync(join(r, 'templates'))).toBe(false)
+    syncBundledTemplates(r, appTpl)
+
+    expect(existsSync(join(r, 'templates', 'default', 'elements.json'))).toBe(true)
+    expect(existsSync(join(r, 'templates', 'default', 'config.json'))).toBe(true)
+  })
+
+  it('after syncBundledTemplates, ensureDefaultProject no longer throws for a stale workspace', () => {
+    const r = root()
+    // Stale workspace: templates/default has config + registry but NOT elements.json
+    // projects/default/tasks exists with config + registry but NOT elements.json
+    const tplDefault = join(r, 'templates', 'default')
+    mkdirSync(tplDefault, { recursive: true })
+    writeFileSync(join(tplDefault, 'config.json'), '{"resolver":{"impl":"ollama"}}')
+    writeFileSync(join(tplDefault, 'registry.json'), '{"create":{"class":"normal"}}')
+    // elements.json intentionally absent in templates/default
+
+    const tasks = join(r, 'projects', 'default', 'tasks')
+    for (const s of ['queue', 'cards', 'history', 'artifacts'])
+      mkdirSync(join(tasks, s), { recursive: true })
+    writeFileSync(join(tasks, 'config.json'), '{"resolver":{"impl":"ollama"}}')
+    writeFileSync(join(tasks, 'registry.json'), '{"create":{"class":"normal"}}')
+    // elements.json intentionally absent in tasks too
+
+    // Without syncBundledTemplates, ensureDefaultProject would throw
+    expect(() => ensureDefaultProject(r)).toThrow(/elements\.json/)
+
+    // appTemplatesDir is the repo's bundled templates which DOES have elements.json
+    const appTpl = mkdtempSync(join(tmpdir(), 'app-tpl-'))
+    const appTplDefault = join(appTpl, 'default')
+    mkdirSync(appTplDefault, { recursive: true })
+    writeFileSync(join(appTplDefault, 'config.json'), '{"resolver":{"impl":"bundled"}}')
+    writeFileSync(join(appTplDefault, 'registry.json'), '{"create":{"class":"normal"}}')
+    writeFileSync(join(appTplDefault, 'elements.json'), ELEMENTS_STUB)
+
+    // After sync, elements.json lands in templates/default; ensureDefaultProject succeeds
+    syncBundledTemplates(r, appTpl)
+    expect(() => ensureDefaultProject(r)).not.toThrow()
+    // Also verify elements.json now exists in tasks (backfilled by ensureDefaultProject)
+    expect(existsSync(join(tasks, 'elements.json'))).toBe(true)
+  })
+
+  it('is a no-op when appTemplatesDir is falsy', () => {
+    const r = root()
+    // Should not throw and should not create anything
+    expect(() => syncBundledTemplates(r, '')).not.toThrow()
+    expect(existsSync(join(r, 'templates'))).toBe(false)
+  })
+
+  it('is a no-op when appTemplatesDir does not exist', () => {
+    const r = root()
+    expect(() => syncBundledTemplates(r, '/no/such/dir/app-templates')).not.toThrow()
+    expect(existsSync(join(r, 'templates'))).toBe(false)
   })
 })

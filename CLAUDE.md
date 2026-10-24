@@ -2,6 +2,17 @@
 
 A local, LLM-assisted task manager built on the xweb shell. You type a plain-text instruction; a card exists, or gets updated, or gets the right status — and every decision the model made is visible as a file you can edit. Three layers: data in `workspace/projects/<name>/tasks/`, two dumb surfaces at `127.0.0.1:7920/feed` and `/board`, and capabilities bound by name in each project's `config.json`. Swap a capability by editing that file. If a bound capability fails, the instruction parks in `attention` with the real error. Nothing silently degrades.
 
+## Development principles — NON-NEGOTIABLE
+
+These govern every change. If a change violates one, the change is wrong.
+
+- **Declarative over imperative.** A registry (JSON) declares what exists. A resolver matches input to entries. A handler does the work. The router is just the pipe. This pattern applies everywhere — verbs, capabilities, content element types. Adding a thing is adding a registry entry + a schema + a handler behind a contract, never a new branch in the engine.
+- **No fallbacks.** A fallback or default value hides what the system is doing. If a value is not there, throw (at load) or park the instruction in `attention` with the real error (at runtime). Never silently default, coerce, or guess. No silent degradation.
+- **Fail loud.** Every failure is visible — a startup throw, or an `attention` row with the real error. A swallowed error is a bug. A caught error that is not surfaced is a bug.
+- **No assumptions.** Verify before acting. Don't assume a path, a running state, a file's contents, or that a change took effect — read it, check it, test it. When unsure, look; don't guess. (This applies to the code and to the work: confirm the real workspace, confirm the build is live, watch the test fail.)
+- **Contracts, not logic.** Each boundary is a defined interface. Swap any part — a matcher, a resolver, a handler, a content-element shape — and the system holds because the contract stays. Don't inline a capability; bind it by name behind its contract.
+- **Enforcement by design.** If the architecture makes the wrong thing impossible, you don't need a rule against it. The shape of the code is the enforcement.
+
 ## Data layout
 
 ```
@@ -41,6 +52,8 @@ Switching = writing `workspace/current`. A watcher on that file makes hand edits
 
 A template is a directory of card `.md` files plus optional `config.json` / `registry.json` overrides. Ship three starters: `gtd`, `renovation`, `business-canvas`. Authoring a template = copying a project you like into `workspace/templates/<name>/` and pruning.
 
+**Registry reconciliation (boot/bind).** A deck created before a core verb existed would park that verb loud forever (its `registry.json` has no entry). So on every project bind, `reconcileRegistry` backfills any action entries and alias keys the project is missing from `templates/default/registry.json` — only *adding* what's absent; an entry the project already has (even one hand-customized to differ) is never touched. When anything is added it writes the file back and logs a `done` notice to the feed (`backfilled from the default template: …`). A verb the parser claims but that is still absent from the registry parks in `attention` ("no registry entry for action …") rather than crashing the engine — no brick, no silent degradation.
+
 ## Working-directory resolution
 
 The workspace root is resolved in this order:
@@ -62,7 +75,9 @@ Surfaces hold no state beyond the DOM. They render SSE snapshots from `/api/even
 
 ### CLI Layer
 
-Type bare verbs (`create|new`, `move|mv`, `note|log`, `link`, `delete|del|rm`, `delegate`) to act on tasks. Sigils augment: `#tag/#ref` names a card, `$status/$date` sets state, `@collaborator` routes to an executor, `^scope` sets how much context a delegation carries (`^card` default = title + description; `^full` adds the card's activity log and prior outputs; `^board` adds a one-line roster of the project's other live cards). A collaborator may carry its own default `scope` in `config.json`; the inline `^` sigil overrides it. Prefix with `/` to force command mode (fails loud on parse).
+Type bare verbs (`create|new`, `move|mv`, `note|log`, `link`, `delete|del|rm`, `delegate`, `rename`, `reslug`, `describe`, `open`) to act on tasks. `rename #card <title>` changes the title (slug follows); `reslug #old #new` changes the slug directly, title untouched (destructive — confirms); `describe #card <text>` sets the card body. Sigils augment: `#tag/#ref` names a card, `$status/$date` sets state, `@collaborator` routes to an executor, `^scope` sets how much context a delegation carries (`^card` default = title + description; `^full` adds the card's activity log and prior outputs; `^board` adds a one-line roster of the project's other live cards). A collaborator may carry its own default `scope` in `config.json`; the inline `^` sigil overrides it. Prefix with `/` to force command mode (fails loud on parse).
+
+**Open-card fallback (declarative).** When a card is open on the board (by click or `open #card`) and you type a card-verb with no `#ref`, the action targets that open card. It is applied in the CLI parser *after* parsing — not by string-injecting a `#ref` — so it works regardless of text layout (notably multiline notes, where a trailing `#ref` could never be tokenized). The board reports its open/closed card to the engine via `POST /api/open` (transient, in-memory, per-device — never written to the synced workspace; cleared on project switch); the engine passes it into `parseCommand` as `openCard`. An explicit `#ref` binds earlier and always wins; nothing open parks loud as before. `open` never inherits it (navigating *to* a card); `reslug` names both slugs itself; `create` and bare `+` capture make something new. A bare `@collaborator` (implicit delegate) targets the open card when one is open, else creates a new delegated card.
 
 **Privacy.** A card labeled `private` (name set by `ui.private_label`) is never sent to an external agent: delegating it to a collaborator whose `use` is `agent` (claude-cli) parks the instruction in `attention`, and private cards are omitted from any `^board` roster. The on-device `generator` (Ollama) is still allowed — it never leaves the machine. The label renders as a slate (`--private`) toggle/edge on the board. Recognized commands that fail their grammar park loud; **input with no recognized command also parks loud** — it is NOT silently filed as a card (a typo'd command or stray line should never become a card). To capture a thought as a card, prefix the line with `+` (`+ call the plumber #urgent` → a card). A claimed verb with a fuzzy card ref gets exactly one model question — which card — shown as `via: cli+ai` (`›_✦`). See `docs/specs/2026-10-06-slot-resolution-design.md` and `docs/specs/2026-10-19-explicit-capture.md`.
 

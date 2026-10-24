@@ -1,19 +1,20 @@
 // src/main/__tests__/project-manager.test.ts
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ProjectManager } from '../project-manager'
 import { writeInstruction, readInstruction } from '../tasks/files'
 import { createProject } from '../tasks/projects'
 
-/** A directory containing only templates/default config + registry — simulates bundled app templates. */
+/** A directory containing only templates/default config + registry + elements — simulates bundled app templates. */
 function makeAppTemplatesDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'app-tpl-'))
   const dflt = join(dir, 'default')
   mkdirSync(dflt, { recursive: true })
   writeFileSync(join(dflt, 'config.json'), OFFLINE_CONFIG)
   writeFileSync(join(dflt, 'registry.json'), REGISTRY)
+  writeFileSync(join(dflt, 'elements.json'), ELEMENTS)
   return dir
 }
 
@@ -44,6 +45,15 @@ const REGISTRY = JSON.stringify({
   project_rm: { class: 'destructive' }
 })
 
+const ELEMENTS = JSON.stringify({
+  text:   { schema: 'text.v1.json',   lead: true,            ops: ['edit'] },
+  note:   { schema: 'note.v1.json',   section: 'Notes',      ops: ['add','edit','scratch','drop'] },
+  date:   { schema: 'date.v1.json',   section: 'Dates',      ops: ['add','edit','drop'] },
+  person: { schema: 'person.v1.json', section: 'People',     ops: ['add','edit','drop'] },
+  output: { schema: 'output.v1.json', storage: 'fs',         ops: ['add','edit','drop'] },
+  log:    { schema: 'log.v1.json',    section: 'Log', system: true, ops: ['append'] }
+})
+
 /** Build a legacy-layout root (workspace/tasks) for migration testing. */
 function makeLegacyRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'pm-'))
@@ -52,6 +62,7 @@ function makeLegacyRoot(): string {
     mkdirSync(join(tasksDir, s), { recursive: true })
   writeFileSync(join(tasksDir, 'config.json'), OFFLINE_CONFIG)
   writeFileSync(join(tasksDir, 'registry.json'), REGISTRY)
+  writeFileSync(join(tasksDir, 'elements.json'), ELEMENTS)
   return root
 }
 
@@ -63,6 +74,7 @@ function makeProjectsRoot(): string {
     mkdirSync(join(tasksDir, s), { recursive: true })
   writeFileSync(join(tasksDir, 'config.json'), OFFLINE_CONFIG)
   writeFileSync(join(tasksDir, 'registry.json'), REGISTRY)
+  writeFileSync(join(tasksDir, 'elements.json'), ELEMENTS)
   writeFileSync(join(root, 'current'), 'default\n')
   return root
 }
@@ -124,6 +136,43 @@ describe('ProjectManager', () => {
     expect(pm.getTasksDir()).not.toBe(defaultTasksDir)
   })
 
+  it('boot() reconciles a stale active-project registry from the template and logs a done notice', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pm-'))
+    // Template knows `open` (+ its alias); the project registry predates it.
+    const tplReg = JSON.stringify(
+      { aliases: { open: ['expand'] }, ...JSON.parse(REGISTRY), open: { class: 'normal', target: 'resolve' } },
+      null,
+      2
+    )
+    mkdirSync(join(root, 'templates', 'default'), { recursive: true })
+    writeFileSync(join(root, 'templates', 'default', 'registry.json'), tplReg)
+    writeFileSync(join(root, 'templates', 'default', 'config.json'), OFFLINE_CONFIG)
+    writeFileSync(join(root, 'templates', 'default', 'elements.json'), ELEMENTS)
+    const tasksDir = join(root, 'projects', 'default', 'tasks')
+    for (const s of ['queue', 'cards', 'history', 'artifacts'])
+      mkdirSync(join(tasksDir, s), { recursive: true })
+    writeFileSync(join(tasksDir, 'config.json'), OFFLINE_CONFIG)
+    writeFileSync(join(tasksDir, 'registry.json'), REGISTRY) // lacks open + aliases
+    writeFileSync(join(tasksDir, 'elements.json'), ELEMENTS)
+    writeFileSync(join(root, 'current'), 'default\n')
+
+    const pm = new ProjectManager(root, '', 'this-mac', () => {})
+    managers.push(pm)
+    await pm.boot()
+
+    const reg = JSON.parse(readFileSync(join(tasksDir, 'registry.json'), 'utf-8'))
+    expect(reg.open).toEqual({ class: 'normal', target: 'resolve' })
+    expect(reg.aliases.open).toEqual(['expand'])
+
+    const notices = readdirSync(join(tasksDir, 'queue'))
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => readInstruction(join(tasksDir, 'queue', f)))
+      .filter((i) => i.action === 'reconcile')
+    expect(notices.length).toBe(1)
+    expect(notices[0].status).toBe('done')
+    expect(notices[0].result).toMatch(/open/)
+  })
+
   it('pm.stop() closes cleanly', async () => {
     const root = makeProjectsRoot()
     const pm = new ProjectManager(root, '', 'this-mac', () => {})
@@ -141,6 +190,32 @@ describe('ProjectManager', () => {
     await pm.boot()
     // templates/default must now exist in the root
     expect(existsSync(join(root, 'templates', 'default', 'config.json'))).toBe(true)
+  })
+
+  it('boot() backfills elements.json into an existing templates/default that predates Task 7 (regression guard)', async () => {
+    // Simulate a pre-Task-7 workspace: projects/default/tasks has config + registry + elements
+    // (it got elements from a previous ensureDefaultProject run), but templates/default
+    // only has config + registry — elements.json was never there.
+    const root = makeProjectsRoot()
+    // Create the stale templates/default (config + registry, no elements.json)
+    const tplDefault = join(root, 'templates', 'default')
+    mkdirSync(tplDefault, { recursive: true })
+    writeFileSync(join(tplDefault, 'config.json'), '{"sentinel":"pre-task7"}')
+    writeFileSync(join(tplDefault, 'registry.json'), REGISTRY)
+    // elements.json intentionally absent — this is what triggers the regression
+
+    // appTemplatesDir (bundled) has all three files
+    const appTplDir = makeAppTemplatesDir()
+
+    const pm = new ProjectManager(root, appTplDir, 'this-mac', () => {})
+    managers.push(pm)
+    // Before the fix this would throw:
+    // "elements.json is missing from projects/default/tasks and from templates/default"
+    await expect(pm.boot()).resolves.not.toThrow()
+    // elements.json must now be present in templates/default (backfilled from bundle)
+    expect(existsSync(join(tplDefault, 'elements.json'))).toBe(true)
+    // Existing config.json must NOT be overwritten
+    expect(JSON.parse(readFileSync(join(tplDefault, 'config.json'), 'utf-8')).sentinel).toBe('pre-task7')
   })
 
   it('boot() does not overwrite an existing templates/ dir', async () => {

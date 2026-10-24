@@ -22,6 +22,10 @@
   --ease-move: cubic-bezier(0.3, 0.7, 0.25, 1);
   --dur: 180ms; --dur-grow: 240ms; --dur-move: 380ms;
   --mono: 10px/1.5 Menlo, Monaco, monospace;
+  /* line-height roles. --lh-row is ONE fixed line box for dense single-line rows
+     (output head, log line, note foot): mixed type sizes on the same row share it,
+     so hiding a row's contents (e.g. an output preview on expand) never reflows it. */
+  --lh-row: 21px;
 }
 /* type roles */
 .t-hero  { font: 640 30px/1.14 garamond, serif; letter-spacing: -0.012em; }

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { loadConfig } from '../tasks/config'
-import { loadRegistry } from '../tasks/registry'
+import { loadRegistry, reconcileRegistry } from '../tasks/registry'
 
 function tasksDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'td-'))
@@ -96,5 +96,63 @@ describe('loadRegistry', () => {
       'registry.json': JSON.stringify({ delegate: { class: 'normal', target: 'banana' } })
     })
     expect(() => loadRegistry(dir)).toThrow(/unknown target "banana"/)
+  })
+})
+
+const TPL_REG = JSON.stringify(
+  {
+    aliases: { delete: ['rm'], open: ['expand'] },
+    create: { class: 'normal', target: 'none' },
+    delete: { class: 'destructive', target: 'resolve' },
+    open: { class: 'normal', target: 'resolve' },
+    check: { class: 'meta' }
+  },
+  null,
+  2
+)
+
+function tplFile(content: string): string {
+  const p = join(mkdtempSync(join(tmpdir(), 'tpl-')), 'registry.json')
+  writeFileSync(p, content)
+  return p
+}
+
+describe('reconcileRegistry', () => {
+  it('backfills missing actions and alias keys from the template, returns what was added', () => {
+    const dir = tasksDir({
+      'registry.json': JSON.stringify({
+        aliases: { delete: ['rm'] },
+        create: { class: 'normal', target: 'none' },
+        delete: { class: 'destructive', target: 'resolve' }
+      })
+    })
+    const added = reconcileRegistry(dir, tplFile(TPL_REG))
+    expect([...added].sort()).toEqual(['alias:open', 'check', 'open'])
+    const { registry, aliases } = loadRegistry(dir)
+    expect(registry.open).toEqual({ class: 'normal', target: 'resolve' })
+    expect(registry.check).toEqual({ class: 'meta' })
+    expect(aliases.open).toEqual(['expand'])
+    expect(aliases.delete).toEqual(['rm']) // preserved
+  })
+  it('is a no-op when the registry already has everything', () => {
+    const dir = tasksDir({ 'registry.json': TPL_REG })
+    expect(reconcileRegistry(dir, tplFile(TPL_REG))).toEqual([])
+  })
+  it('never overwrites an existing entry that differs from the template', () => {
+    const dir = tasksDir({
+      'registry.json': JSON.stringify({
+        aliases: {},
+        create: { class: 'normal', target: 'none' },
+        delete: { class: 'normal', target: 'resolve' } // user-customized, not destructive
+      })
+    })
+    reconcileRegistry(dir, tplFile(TPL_REG))
+    expect(loadRegistry(dir).registry.delete).toEqual({ class: 'normal', target: 'resolve' })
+  })
+  it('returns [] when the template is missing (graceful, no throw)', () => {
+    const dir = tasksDir({ 'registry.json': TPL_REG })
+    expect(reconcileRegistry(dir, join(tmpdir(), 'no-such-template-xyz', 'registry.json'))).toEqual(
+      []
+    )
   })
 })

@@ -11,7 +11,9 @@ import {
   handleDelete,
   handleLabel,
   handleUnlabel,
-  handleRename
+  handleRename,
+  handleReslug,
+  handleDescribe
 } from '../tasks/handlers'
 
 function dir(): string {
@@ -173,9 +175,13 @@ describe('handleRename (copy/delete — slug follows the title)', () => {
       links: [],
       labels: ['urgent'],
       description: 'body',
-      notes: ['n1'],
-      log: ['2026-10-01 00:00 — created']
-    })
+      log: ['2026-10-01 00:00 — created'],
+      // Use explicit elements — legacy notes reconcile removed
+      elements: [
+        { id: 'lead', type: 'text', data: { text: 'body' } },
+        { id: 'n1', type: 'note', data: { at: '', text: 'n1' } }
+      ]
+    } as never)
     writeCard(tasksDir, {
       shortname: 'other',
       title: 'other',
@@ -222,6 +228,114 @@ describe('handleRename (copy/delete — slug follows the title)', () => {
     const slug = handleRename({ tasksDir, now }, 'press-plan', 'Press Plan')
     expect(slug).toBe('press-plan')
     expect(readCard(join(tasksDir, 'cards', 'press-plan.md')).title).toBe('Press Plan')
+  })
+})
+
+describe('handleDescribe (set the card body directly)', () => {
+  it('replaces the description and keeps title/labels/status; logs the change', () => {
+    const tasksDir = dir()
+    writeCard(tasksDir, {
+      shortname: 'press-plan',
+      title: 'press plan',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: ['urgent'],
+      description: 'old body',
+      log: []
+    })
+    handleDescribe({ tasksDir, now }, 'press-plan', 'a fresh body')
+    const card = readCard(join(tasksDir, 'cards', 'press-plan.md'))
+    expect(card.description).toBe('a fresh body')
+    expect(card.title).toBe('press plan')
+    expect(card.labels).toEqual(['urgent'])
+    expect(card.status).toBe('active')
+    expect(card.log.some((l) => l.includes('description'))).toBe(true)
+  })
+  it('throws for a missing card', () => {
+    const tasksDir = dir()
+    expect(() => handleDescribe({ tasksDir, now }, 'nope', 'x')).toThrow(/card not found/)
+  })
+})
+
+describe('handleReslug (change the slug directly — title untouched)', () => {
+  it('moves the card to the new slug, keeps the title, moves artifacts, repoints links', () => {
+    const tasksDir = dir()
+    writeCard(tasksDir, {
+      shortname: 'mostrar-2',
+      title: 'Mostrar el panel',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: ['urgent'],
+      description: 'body',
+      log: ['2026-10-01 00:00 — created'],
+      // Use explicit elements — legacy notes reconcile removed
+      elements: [
+        { id: 'lead', type: 'text', data: { text: 'body' } },
+        { id: 'n1', type: 'note', data: { at: '', text: 'n1' } }
+      ]
+    } as never)
+    writeCard(tasksDir, {
+      shortname: 'other',
+      title: 'other',
+      status: 'active',
+      created: '2026-10-01',
+      links: ['mostrar-2'],
+      labels: [],
+      description: '',
+      log: []
+    })
+    mkdirSync(join(tasksDir, 'artifacts', 'mostrar-2'), { recursive: true })
+    writeFileSync(join(tasksDir, 'artifacts', 'mostrar-2', 'out.md'), 'output')
+
+    const slug = handleReslug({ tasksDir, now }, 'mostrar-2', 'mostrar')
+    expect(slug).toBe('mostrar')
+    expect(existsSync(join(tasksDir, 'cards', 'mostrar-2.md'))).toBe(false)
+    const nw = readCard(join(tasksDir, 'cards', 'mostrar.md'))
+    expect(nw.title).toBe('Mostrar el panel') // title preserved, NOT re-derived
+    expect(nw.description).toBe('body')
+    expect(nw.notes).toEqual(['n1'])
+    expect(nw.labels).toEqual(['urgent'])
+    expect(nw.log.some((l) => l.includes('reslugged from #mostrar-2'))).toBe(true)
+    expect(existsSync(join(tasksDir, 'artifacts', 'mostrar-2'))).toBe(false)
+    expect(readFileSync(join(tasksDir, 'artifacts', 'mostrar', 'out.md'), 'utf-8')).toBe('output')
+    expect(readCard(join(tasksDir, 'cards', 'other.md')).links).toEqual(['mostrar'])
+  })
+  it('refuses to clobber an existing slug', () => {
+    const tasksDir = dir()
+    for (const s of ['mostrar-2', 'mostrar']) {
+      writeCard(tasksDir, {
+        shortname: s,
+        title: s,
+        status: 'active',
+        created: '2026-10-01',
+        links: [],
+        labels: [],
+        description: '',
+        log: []
+      })
+    }
+    expect(() => handleReslug({ tasksDir, now }, 'mostrar-2', 'mostrar')).toThrow(
+      /already uses that slug/
+    )
+    expect(existsSync(join(tasksDir, 'cards', 'mostrar-2.md'))).toBe(true)
+  })
+  it('rejects an invalid slug', () => {
+    const tasksDir = dir()
+    writeCard(tasksDir, {
+      shortname: 'mostrar-2',
+      title: 'm',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    expect(() => handleReslug({ tasksDir, now }, 'mostrar-2', 'bad_slug')).toThrow(
+      /not a valid slug/
+    )
   })
 })
 

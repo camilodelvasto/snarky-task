@@ -42,16 +42,22 @@ export interface ProjectOps {
 export interface Card {
   shortname: string
   path: string
+  id: string // stable card id (minted once, stored in frontmatter as v:2)
   title: string
   status: CardStatus
   created: string // YYYY-MM-DD
   due?: string
   links: string[]
   labels: string[]
-  description: string
-  notes: string[] // user-authored notes — card content; sent to delegates by default
-  log: string[] // system events (status, labels, delegation) — withheld unless scope ≥ full
-  artifacts: string[] // filenames in artifacts/<shortname>/
+  // Source-of-truth element list — set by readCard, fed into writeCard
+  elements: import('./elements/types').Element[]
+  // Read-only derived fields — computed by readCard from elements; consumed by handlers
+  // and existing surfaces without any change. writeCard reconciles these into elements
+  // when the caller passes legacy values.
+  description: string // derived: lead text element's data.text, or ''
+  notes: string[] // derived: note elements' data.text (user content, sent to delegates)
+  log: string[] // derived: log elements' data.line (system events)
+  artifacts: string[] // derived: output elements' data.file (filenames in artifacts/<shortname>/)
 }
 
 export interface Snapshot {
@@ -59,6 +65,8 @@ export interface Snapshot {
   cards: Card[]
   project?: { current: string; list: string[]; templates: string[] }
   nav?: { card: string; seq: number } // transient UI nav: board expands this card
+  open?: string // the card currently open on the board (surfaced for UI; the engine applies the fallback)
+  elementTypes?: Record<string, { section?: string; lead?: boolean; system?: boolean; ops: string[] }> // per-type config the surfaces render + act from
 }
 
 export type OperationClass = 'normal' | 'destructive' | 'meta'

@@ -3,6 +3,8 @@ import { join } from 'path'
 import { writeCard, readCard, appendLog, slugify } from './files'
 import type { CardStatus } from './types'
 import type { PrepassResult } from './prepass'
+import { applyOp } from './elements/ops'
+import { BUNDLED } from './elements/registry'
 
 export interface HandlerCtx {
   tasksDir: string
@@ -95,7 +97,7 @@ export function handleNote(ctx: HandlerCtx, card: string, raw: string): string {
   const existing = readCard(path)
   writeCard(ctx.tasksDir, {
     ...existing,
-    notes: [...existing.notes, `${stamp(ctx.now)} — ${raw}`]
+    elements: applyOp(existing.elements, 'note', 'add', { at: stamp(ctx.now), text: raw }, BUNDLED)
   })
   return `note on #${card}`
 }
@@ -177,6 +179,61 @@ export function handleRename(ctx: HandlerCtx, card: string, newTitle: string): s
     shortname: slug,
     title,
     log: [...old.log, `${stamp(ctx.now)} — renamed from #${card}`]
+  })
+  // Move the artifacts folder so prior outputs follow the card.
+  const oldArt = join(ctx.tasksDir, 'artifacts', card)
+  if (existsSync(oldArt)) renameSync(oldArt, join(ctx.tasksDir, 'artifacts', slug))
+  // Repoint `#ref` links in every other card (body-text refs are left as-is).
+  const cardsDir = join(ctx.tasksDir, 'cards')
+  for (const f of readdirSync(cardsDir).filter((n) => n.endsWith('.md'))) {
+    if (f === `${card}.md`) continue
+    const c = readCard(join(cardsDir, f))
+    if (c.links.includes(card))
+      writeCard(ctx.tasksDir, { ...c, links: c.links.map((l) => (l === card ? slug : l)) })
+  }
+  rmSync(path)
+  return slug
+}
+
+/**
+ * Set a card's description (body) directly from the console — the piece rename
+ * (title) and note (log) don't cover. Replaces the description wholesale; notes,
+ * labels, status and title are untouched. Logs that the body changed.
+ */
+export function handleDescribe(ctx: HandlerCtx, card: string, text: string): string {
+  const path = cardPath(ctx, card) // throws if the card is missing
+  const old = readCard(path)
+  writeCard(ctx.tasksDir, {
+    ...old,
+    elements: applyOp(old.elements, 'text', 'edit', { text }, BUNDLED)
+  })
+  appendLog(path, `${stamp(ctx.now)} — description updated`)
+  return card
+}
+
+/**
+ * Change a card's slug directly to an explicit value — unlike rename, the title
+ * is left untouched (the slug is the thing being set, not a side effect of a new
+ * title). Same copy-then-delete motion as rename: write under the new slug with
+ * everything preserved, move artifacts, repoint structured `#ref` links, delete
+ * the old file. Refuses to clobber an existing slug and validates the new one so
+ * a bad target parks loud instead of corrupting the deck. Returns the new slug.
+ */
+export function handleReslug(ctx: HandlerCtx, card: string, newSlug: string): string {
+  const slug = newSlug.trim().toLowerCase()
+  if (!slug) throw new Error('reslug needs a new slug')
+  if (!/^[a-z0-9-]+$/.test(slug)) throw new Error(`"${slug}" is not a valid slug ([a-z0-9-])`)
+  const path = cardPath(ctx, card) // throws if the card is missing
+  if (slug === card) throw new Error(`#${card} already has that slug`)
+  if (existsSync(join(ctx.tasksDir, 'cards', `${slug}.md`)))
+    throw new Error(`cannot reslug to #${slug} — a card already uses that slug`)
+  const old = readCard(path)
+
+  // Copy to the new slug, preserving everything including the title.
+  writeCard(ctx.tasksDir, {
+    ...old,
+    shortname: slug,
+    log: [...old.log, `${stamp(ctx.now)} — reslugged from #${card}`]
   })
   // Move the artifacts folder so prior outputs follow the card.
   const oldArt = join(ctx.tasksDir, 'artifacts', card)

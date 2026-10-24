@@ -5,6 +5,17 @@ import { join } from 'path'
 import { writeInstruction, writeCard } from '../tasks/files'
 import { readSnapshot } from '../tasks/snapshot'
 
+it('ships the element-type ops map (from the bundled shapes) for the surfaces', () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
+  for (const d of ['queue', 'cards', 'artifacts']) mkdirSync(join(dir, d), { recursive: true })
+  const { elementTypes } = readSnapshot(dir)
+  expect(elementTypes).toBeDefined()
+  expect(elementTypes!.note.ops).toContain('scratch')
+  expect(elementTypes!.text.lead).toBe(true)
+  expect(elementTypes!.log.system).toBe(true)
+  expect(elementTypes!.output.ops).not.toContain('scratch')
+})
+
 it('derives a snapshot from files, skipping unparseable ones', () => {
   const dir = join(mkdtempSync(join(tmpdir(), 'td-')), 'tasks')
   for (const d of ['queue', 'cards', 'artifacts']) mkdirSync(join(dir, d), { recursive: true })

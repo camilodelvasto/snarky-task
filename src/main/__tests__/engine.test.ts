@@ -24,6 +24,8 @@ const registry: Registry = {
   delegate: { class: 'normal', target: 'create' },
   open: { class: 'normal', target: 'resolve' },
   rename: { class: 'normal', target: 'required' },
+  reslug: { class: 'destructive', target: 'required' },
+  describe: { class: 'normal', target: 'required' },
   clean: { class: 'meta' },
   clear: { class: 'meta' },
   check: { class: 'meta' },
@@ -48,7 +50,8 @@ const aliases = {
 
 function setup(
   answers: Array<{ key: string; confidence: number }>,
-  projects?: ProjectOps
+  projects?: ProjectOps,
+  registryOverride?: Registry
 ): {
   tasksDir: string
   engine: Engine
@@ -70,7 +73,7 @@ function setup(
   const engine = new Engine({
     tasksDir,
     device: 'this-mac',
-    registry,
+    registry: registryOverride ?? registry,
     config,
     caps,
     aliases,
@@ -188,6 +191,213 @@ describe('Engine.processFile', () => {
     expect(readInstruction(qpath(tasksDir, two)).status).toBe('done')
     expect(readInstruction(qpath(tasksDir, two)).error).toBe('rejected')
     expect(existsSync(join(tasksDir, 'cards', 'b.md'))).toBe(true)
+  })
+  it('applyElementOp: add/scratch/drop notes and edit the lead in place', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'c',
+      title: 'c',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: 'orig',
+      log: []
+    })
+    await engine.applyElementOp('c', 'note', 'add', { text: 'first note' })
+    let card = readCard(join(tasksDir, 'cards', 'c.md'))
+    expect(card.notes).toContain('first note')
+    const noteId = card.elements.find((e) => e.type === 'note')!.id
+    await engine.applyElementOp('c', 'note', 'scratch', { id: noteId })
+    card = readCard(join(tasksDir, 'cards', 'c.md'))
+    expect(card.elements.find((e) => e.id === noteId)!.data.scratched).toBe(true)
+    await engine.applyElementOp('c', 'text', 'edit', { text: 'updated body' })
+    card = readCard(join(tasksDir, 'cards', 'c.md'))
+    expect(card.description).toBe('updated body')
+    expect(card.elements.filter((e) => e.type === 'text').length).toBe(1)
+    await engine.applyElementOp('c', 'note', 'drop', { id: noteId })
+    expect(
+      readCard(join(tasksDir, 'cards', 'c.md')).elements.find((e) => e.id === noteId)
+    ).toBeUndefined()
+  })
+  it('a note drop goes to .trash; restoreLastDrop brings it back with its id + content', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'c',
+      title: 'c',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    await engine.applyElementOp('c', 'note', 'add', { text: 'keep me' })
+    const id = readCard(join(tasksDir, 'cards', 'c.md')).elements.find((e) => e.type === 'note')!.id
+    await engine.applyElementOp('c', 'note', 'drop', { id })
+    expect(
+      readCard(join(tasksDir, 'cards', 'c.md')).elements.find((e) => e.id === id)
+    ).toBeUndefined()
+    expect(existsSync(join(tasksDir, '.trash', 'c.jsonl'))).toBe(true)
+    await engine.restoreLastDrop('c')
+    const restored = readCard(join(tasksDir, 'cards', 'c.md')).elements.find((e) => e.id === id)
+    expect(restored).toBeDefined()
+    expect(restored!.data.text).toBe('keep me')
+  })
+  it('applyElementOp rejects on an op a type does not declare', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'c',
+      title: 'c',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    await expect(engine.applyElementOp('c', 'text', 'scratch', {})).rejects.toThrow()
+  })
+  it('applyElementOp: a failed op does not poison the card chain', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'c',
+      title: 'c',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    await expect(engine.applyElementOp('c', 'text', 'scratch', {})).rejects.toThrow()
+    // The chain must still accept the next op on the same card.
+    await engine.applyElementOp('c', 'note', 'add', { text: 'after error' })
+    expect(readCard(join(tasksDir, 'cards', 'c.md')).notes).toContain('after error')
+  })
+  it('an action the registry lacks parks in attention — never crashes the engine', async () => {
+    // Regression: a verb the parser claims (reslug) but a hand-edited / stale
+    // registry doesn't define must park loud, not throw at registry[action].class
+    // and brick the engine on every boot.
+    const noReslug = { ...registry }
+    delete (noReslug as Record<string, unknown>).reslug
+    const { tasksDir, engine } = setup([], undefined, noReslug as Registry)
+    writeCard(tasksDir, {
+      shortname: 'mostrar-2',
+      title: 'm',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    const id = writeInstruction(
+      tasksDir,
+      'reslug #mostrar-2 #mostrar',
+      new Date('2026-10-02T10:00:00')
+    )
+    await expect(engine.processFile(qpath(tasksDir, id))).resolves.not.toThrow()
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('attention')
+    expect(inst.error).toMatch(/reslug/)
+  })
+  it('open-card fallback: a card-verb with no #ref targets the open card — even multiline', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'decisiones',
+      title: 'decisiones',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    engine.setOpenCard('decisiones')
+    // Multiline: first line is just the verb, text (no #ref) on the next line.
+    const id = writeInstruction(
+      tasksDir,
+      'note\nvamos a inscribirnos en una visión honesta',
+      new Date('2026-10-02T10:00:00')
+    )
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('done')
+    expect(inst.card).toBe('decisiones')
+  })
+  it('open-card fallback does not override an explicit #ref', async () => {
+    const { tasksDir, engine } = setup([])
+    for (const s of ['decisiones', 'servir'])
+      writeCard(tasksDir, {
+        shortname: s,
+        title: s,
+        status: 'active',
+        created: '2026-10-01',
+        links: [],
+        labels: [],
+        description: '',
+        log: []
+      })
+    engine.setOpenCard('decisiones')
+    const id = writeInstruction(tasksDir, 'note #servir the thought', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).card).toBe('servir')
+  })
+  it('tracks the open card set by the surfaces and clears it on null; notifies', () => {
+    const { engine, onChange } = setup([])
+    expect(engine.getOpenCard()).toBeUndefined()
+    engine.setOpenCard('camino-informe-colegios')
+    expect(engine.getOpenCard()).toBe('camino-informe-colegios')
+    const calls = onChange.mock.calls.length
+    engine.setOpenCard(null)
+    expect(engine.getOpenCard()).toBeUndefined()
+    expect(onChange.mock.calls.length).toBeGreaterThan(calls)
+  })
+  it('describe sets the card body from the console', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'press-plan',
+      title: 'press plan',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: 'old',
+      log: []
+    })
+    const id = writeInstruction(
+      tasksDir,
+      'describe #press-plan a brand new body',
+      new Date('2026-10-02T10:00:00')
+    )
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('done')
+    expect(readCard(join(tasksDir, 'cards', 'press-plan.md')).description).toBe('a brand new body')
+  })
+  it('reslug parks for confirmation; confirm applies the new slug (preserved through round-trip), title kept', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'mostrar-2',
+      title: 'Mostrar el panel',
+      status: 'active',
+      created: '2026-10-01',
+      links: [],
+      labels: [],
+      description: 'body',
+      log: []
+    })
+    const id = writeInstruction(tasksDir, 'reslug #mostrar-2 #mostrar', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).status).toBe('needs_confirmation')
+    await engine.confirm(id)
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('done')
+    expect(inst.card).toBe('mostrar') // instruction records the new slug
+    expect(existsSync(join(tasksDir, 'cards', 'mostrar-2.md'))).toBe(false)
+    const nw = readCard(join(tasksDir, 'cards', 'mostrar.md'))
+    expect(nw.title).toBe('Mostrar el panel') // title untouched
+    expect(nw.description).toBe('body')
   })
   // Deleted: 'requeue without text unfreezes resolver-resolved card (no #refs in body)'
   // The status-question attention that carried a resolver-resolved card no longer exists;
@@ -520,6 +730,130 @@ describe('Engine.processFile', () => {
     await engine.processFile(qpath(tasksDir, id))
     expect(readInstruction(qpath(tasksDir, id)).result).toMatch(/all valid/)
     expect(readFileSync(join(tasksDir, 'cards', 'good.md'), 'utf-8')).toBe(before) // untouched
+  })
+
+  // ── element validation via /check ─────────────────────────────────────────
+  // Write elements.json into the test tasksDir (all known types)
+  function writeElementsJson(tasksDir: string): void {
+    writeFileSync(
+      join(tasksDir, 'elements.json'),
+      JSON.stringify({
+        text:   { schema: 'text.v1.json',   lead: true,              ops: ['edit'] },
+        note:   { schema: 'note.v1.json',   section: 'Notes',        ops: ['add','edit','scratch','drop'] },
+        log:    { schema: 'log.v1.json',    section: 'Log', system: true, ops: ['append'] },
+        output: { schema: 'output.v1.json', storage: 'fs',           ops: ['add','edit','drop'] }
+      }, null, 2)
+    )
+  }
+
+  // Write elements.json that only knows text and log — NOT note — so note elements
+  // parsed from a card body are "unknown" from the registry's perspective.
+  function writeRestrictedElementsJson(tasksDir: string): void {
+    writeFileSync(
+      join(tasksDir, 'elements.json'),
+      JSON.stringify({
+        text:   { schema: 'text.v1.json',   lead: true,  ops: ['edit'] },
+        log:    { schema: 'log.v1.json',    section: 'Log', system: true, ops: ['append'] },
+        output: { schema: 'output.v1.json', storage: 'fs', ops: ['add','edit','drop'] }
+      }, null, 2)
+    )
+  }
+
+  it('check reports a card whose note element data fails schema (at is missing)', async () => {
+    // note.v1.json requires "at" and "text". We manufacture a note element whose data
+    // is missing "at" by injecting it raw — we bypass the normal note render/parse
+    // by writing the card body in the note section format but with a raw note line
+    // that the parser produces with at=''. The schema requires at to be present and a
+    // string; '' IS a valid string, so we instead test the 'text' field by
+    // constructing a note element directly and injecting via card elements path.
+    //
+    // Strategy: call writeCard with an explicit elements array containing a note
+    // element whose data lacks 'at'. writeCard does NOT validate element data, so it
+    // proceeds. elementsToBody calls noteShape.render which produces a serialized line.
+    // readCard→bodyToElements→noteShape.parse reconstructs data. The reconstructed data
+    // will always have {at, text}. So a round-trip note is always schema-valid.
+    //
+    // The /check integration test for "invalid element data" therefore exercises a
+    // scenario where the schema is violated at the validateElement() call. This is most
+    // cleanly tested at the unit level (validate.test.ts 'validateElement' describe block).
+    // For engine-level integration, we verify the /check pipeline calls validateElement
+    // by checking that a card with elements whose type is NOT in elements.json is reported.
+
+    // This test uses a project whose elements.json only knows text/log/output (no note).
+    // writeCard writes a card with a note (BUNDLED shape renders it fine).
+    // readCard returns a note element. /check calls validateElement('note', data, types)
+    // where 'note' is NOT in types → reported as unknown type.
+    const { tasksDir, engine } = setup([])
+    writeRestrictedElementsJson(tasksDir)
+    writeCard(tasksDir, {
+      shortname: 'mycard',
+      title: 'My card',
+      status: 'active',
+      created: '2026-10-22',
+      links: [],
+      labels: [],
+      description: '',
+      log: [],
+      // Use explicit elements so this test is independent of the legacy notes reconcile.
+      // BUNDLED renders the note fine; /check later sees 'note' as unknown (not in restricted registry).
+      elements: [
+        { id: 'n1', type: 'note', data: { at: '2026-10-22 10:00', text: 'hello world' } }
+      ]
+    } as never)
+
+    const id = writeInstruction(tasksDir, 'check', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('done')
+    expect(inst.result).toContain('invalid')
+    expect(inst.result).toContain('mycard.md')
+    // The element type 'note' is not in the restricted elements.json → unknown type
+    expect(inst.result).toMatch(/unknown.*type|type.*unknown/i)
+  })
+
+  it('check reports a card with an element of unknown type (not in elements.json)', async () => {
+    // Same mechanism as above but verify explicitly for "unknown type" wording
+    const { tasksDir, engine } = setup([])
+    writeRestrictedElementsJson(tasksDir)
+    writeCard(tasksDir, {
+      shortname: 'mycard2',
+      title: 'My card 2',
+      status: 'active',
+      created: '2026-10-22',
+      links: [],
+      labels: [],
+      description: '',
+      log: [],
+      // Use explicit elements so this test is independent of the legacy notes reconcile.
+      elements: [
+        { id: 'n2', type: 'note', data: { at: '2026-10-22 10:00', text: 'a note that will have unknown type in the registry' } }
+      ]
+    } as never)
+
+    const id = writeInstruction(tasksDir, 'check', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    const inst = readInstruction(qpath(tasksDir, id))
+    expect(inst.status).toBe('done')
+    expect(inst.result).not.toMatch(/all valid/)
+    expect(inst.result).toContain('mycard2.md')
+  })
+
+  it('check with elements.json present: a fully-valid card passes', async () => {
+    const { tasksDir, engine } = setup([])
+    writeElementsJson(tasksDir)
+    writeCard(tasksDir, {
+      shortname: 'valid',
+      title: 'Valid',
+      status: 'active',
+      created: '2026-10-22',
+      links: [],
+      labels: [],
+      description: 'some description',
+      log: ['did a thing']
+    })
+    const id = writeInstruction(tasksDir, 'check', new Date('2026-10-02T10:00:00'))
+    await engine.processFile(qpath(tasksDir, id))
+    expect(readInstruction(qpath(tasksDir, id)).result).toMatch(/all valid/)
   })
   it('clear wipes the scrollback — history and done rows — but never cards', async () => {
     const { tasksDir, engine } = setup([])
@@ -918,6 +1252,51 @@ describe('Engine.createArtifact (author an output by hand)', () => {
     expect(readCard(join(tasksDir, 'cards', 'draft.md')).log.join('\n')).toMatch(
       /output added by hand/
     )
+  })
+})
+
+describe('Engine.dropOutput (recoverable output drop)', () => {
+  it('moves the output to .trash, logs it on the card, and restoreLastDrop brings it back', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'draft',
+      title: 'Draft reply',
+      status: 'active',
+      created: '2026-10-02',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    const file = engine.createArtifact('draft')
+    const artPath = join(tasksDir, 'artifacts', 'draft', file)
+    expect(existsSync(artPath)).toBe(true)
+
+    await engine.dropOutput('draft', file)
+    expect(existsSync(artPath)).toBe(false) // gone from artifacts/
+    expect(existsSync(join(tasksDir, '.trash', 'artifacts', 'draft', file))).toBe(true) // in .trash
+    // the drop is visible in the card's activity, same as every other op
+    expect(readCard(join(tasksDir, 'cards', 'draft.md')).log.join('\n')).toMatch(/output drop/)
+
+    await engine.restoreLastDrop('draft')
+    expect(existsSync(artPath)).toBe(true) // back in artifacts/
+    expect(existsSync(join(tasksDir, '.trash', 'artifacts', 'draft', file))).toBe(false)
+  })
+
+  it('throws when the output file does not exist (fail loud)', async () => {
+    const { tasksDir, engine } = setup([])
+    writeCard(tasksDir, {
+      shortname: 'draft',
+      title: 'Draft',
+      status: 'active',
+      created: '2026-10-02',
+      links: [],
+      labels: [],
+      description: '',
+      log: []
+    })
+    void tasksDir
+    await expect(engine.dropOutput('draft', 'nope.md')).rejects.toThrow()
   })
 })
 

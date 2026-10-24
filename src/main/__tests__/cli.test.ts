@@ -99,6 +99,88 @@ describe('parseCommand — claiming', () => {
   })
 })
 
+describe('parseCommand — open-card fallback', () => {
+  const open = { ...deps, openCard: 'press-plan' }
+  it('a card-verb with no #ref targets the open card', () => {
+    expect(parseCommand('note remember the fonts', open)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'note', card: 'press-plan', title: 'remember the fonts' }
+    })
+  })
+  it('an explicit #ref always wins over the open card', () => {
+    expect(parseCommand('note #prototype the thing', open)).toMatchObject({
+      cmd: { action: 'note', card: 'prototype' }
+    })
+  })
+  it('does not fire for `open` — it resolves its own target, never the open card', () => {
+    // 'somethingelse' is not a known card, so open goes to the resolver — it must
+    // NOT silently bind the open card (press-plan).
+    const r = parseCommand('open somethingelse', open)
+    expect(r.kind).toBe('needs-card')
+    expect(r).not.toMatchObject({ cmd: { card: 'press-plan' } })
+  })
+  it('with nothing open, a card-verb with no #ref still parks loud', () => {
+    const r = parseCommand('note remember the fonts', deps)
+    expect(r.kind).toBe('error')
+    expect((r as { error: string }).error).toMatch(/note needs a #card/)
+  })
+})
+
+describe('parseCommand — describe', () => {
+  it('describe #card <text> puts the body in desc, no title', () => {
+    expect(parseCommand('describe #press-plan the new body text', deps)).toEqual({
+      kind: 'claimed',
+      cmd: { action: 'describe', card: 'press-plan', desc: 'the new body text', tags: [] }
+    })
+  })
+  it('folds continuation lines into desc', () => {
+    expect(parseCommand('describe #press-plan line one\nline two', deps)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'describe', card: 'press-plan', desc: 'line one\nline two' }
+    })
+  })
+  it('without a #ref parks loud', () => {
+    const r = parseCommand('describe just some text', deps)
+    expect(r.kind).toBe('error')
+    expect((r as { error: string }).error).toMatch(/describe needs a #card/)
+  })
+})
+
+describe('parseCommand — reslug', () => {
+  it('reslug #old #new claims with the new slug carried in title', () => {
+    expect(parseCommand('reslug #press-plan #renamed', deps)).toEqual({
+      kind: 'claimed',
+      cmd: { action: 'reslug', card: 'press-plan', title: 'renamed', tags: [] }
+    })
+  })
+  it('accepts a bare (unhashed) new slug', () => {
+    expect(parseCommand('reslug #press-plan renamed', deps)).toMatchObject({
+      kind: 'claimed',
+      cmd: { action: 'reslug', card: 'press-plan', title: 'renamed' }
+    })
+  })
+  it('parks when the target slug already names a card', () => {
+    const r = parseCommand('reslug #press-plan #prototype', deps)
+    expect(r.kind).toBe('error')
+    expect((r as { error: string }).error).toMatch(/already uses that slug/)
+  })
+  it('parks when the card to reslug does not exist', () => {
+    const r = parseCommand('reslug #nope #x', deps)
+    expect(r.kind).toBe('error')
+    expect((r as { error: string }).error).toMatch(/no card "#nope"/)
+  })
+  it('parks when the new slug is missing', () => {
+    const r = parseCommand('reslug #press-plan', deps)
+    expect(r.kind).toBe('error')
+    expect((r as { error: string }).error).toMatch(/reslug needs/)
+  })
+  it('parks when the new slug is not a valid slug', () => {
+    const r = parseCommand('reslug #press-plan #bad_slug', deps)
+    expect(r.kind).toBe('error')
+    expect((r as { error: string }).error).toMatch(/not a valid slug/)
+  })
+})
+
 describe('parseCommand — declining (bare)', () => {
   it('unknown verb declines', () => {
     expect(parseCommand('createx submit proposal', deps)).toEqual({ kind: 'declined' })

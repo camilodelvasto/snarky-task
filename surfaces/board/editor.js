@@ -72,16 +72,77 @@ export function wireOpenCard(el, card, api) {
 
   // ── Actions (declarative row — handlers just emit state changes) ───────────
   el.addEventListener('click', (e) => {
-    // Click the rendered markdown to edit it in place (raw md, saved on blur).
-    const mdBody = e.target.closest('.artifact-md')
-    if (mdBody && !mdBody.classList.contains('editing')) {
-      e.stopPropagation()
-      void editArtifact(el, card, mdBody.dataset.file)
-      return
-    }
+    // A single click on rendered output is for reading/selecting; editing is the
+    // `edit` action or a double-click (see the dblclick handler below).
     const act = e.target.closest('[data-act]')?.dataset.act
     if (!act) return
     e.stopPropagation()
+    // Element actions inside a note/date/person row → the declarative op endpoint.
+    // (Must precede the card-level `drop` below, which deletes the whole card.)
+    const elRow = e.target.closest('[data-el-id]')
+    if (elRow && (act === 'scratch' || act === 'restore' || act === 'drop')) {
+      const type = elRow.dataset.elType
+      const p = elementOp(card.shortname, type, act === 'restore' ? 'scratch' : act, {
+        id: elRow.dataset.elId
+      })
+      // A drop is destructive-but-recoverable: the undo shows up in activity.
+      if (act === 'drop') void p.then((ok) => ok && api.flagUndo?.(card.shortname, type))
+      else void p
+      return
+    }
+    // Collapse a whole section — the entire header row is the target (the `write`
+    // button carves itself out by matching its own data-act first). Toggle the DOM
+    // in place (no rebuild/FLIP); api persists the state for the next real render.
+    if (act === 'toggle-sec') {
+      const sec = e.target.closest('[data-sec]')?.dataset.sec
+      const secEl = e.target.closest('.editor-sec')
+      if (sec && secEl) {
+        const open = api.toggleSection?.(sec)
+        secEl.dataset.collapsed = open ? 'false' : 'true'
+        const arrow = secEl.querySelector('.editor-sec-arrow')
+        if (arrow) arrow.textContent = open ? '▾' : '▸'
+      }
+      return
+    }
+    // Open/close one output's full body — in place, lazy-loading on first open.
+    if (act === 'toggle-out') {
+      const file = e.target.closest('[data-file]')?.dataset.file
+      const out = e.target.closest('.editor-out')
+      if (!file || !out) return
+      const open = api.toggleOutput?.(file)
+      const body = out.querySelector('.editor-out-body')
+      if (!open) {
+        out.dataset.collapsed = 'true'
+        if (body) body.hidden = true
+      } else {
+        // Fill the body while it's still hidden, THEN reveal — a first open never
+        // flashes an empty box that grows when the fetch lands (no jump).
+        void loadOutputBody(el, card, file).then(() => {
+          out.dataset.collapsed = 'false'
+          if (body) body.hidden = false
+        })
+      }
+      return
+    }
+    // Undo the latest recoverable drop (the activity notification).
+    if (act === 'undo') {
+      void fetch(`/api/cards/${encodeURIComponent(card.shortname)}/restore`, { method: 'POST' })
+      api.clearUndo?.()
+      return
+    }
+    if (act === 'write-note') {
+      startNoteInput(el, card, api)
+      return
+    }
+    if (act === 'write-output') {
+      void addArtifact(card).then((file) => {
+        if (file) {
+          pendingEditFile = { card: card.shortname, file }
+          api.toggleOutput?.(file) // open the new row → the wire pass drops into editing
+        }
+      })
+      return
+    }
     if (act === 'close') api.closeOpen()
     else if (act === 'promote') void api.moveCard(card, 'active', `promote #${card.shortname}`)
     else if (act === 'done') {
@@ -136,33 +197,93 @@ export function wireOpenCard(el, card, api) {
         if (ev.key === 'Escape') input.blur()
       })
       input.addEventListener('blur', () => api.flushRender())
-    } else if (act === 'artifact') {
+    } else if (act === 'output-edit') {
       const file = e.target.closest('[data-file]')?.dataset.file
-      if (file)
-        void (async () => {
-          await toggleArtifact(el, card, file)
-          // An empty output has no text to click — open it and drop into editing.
-          const body = el.querySelector(`[data-artifact-body="${CSS.escape(file)}"]`)
-          if (body && !body.hidden && !(body.dataset.raw ?? '').trim())
-            void editArtifact(el, card, file)
-        })()
-    } else if (act === 'addartifact') {
-      void addArtifact(card)
-    } else if (act === 'more') {
-      const activity = el.querySelector('.editor-activity')
-      if (activity)
-        activity.innerHTML = (card.log ?? [])
-          .map((line) => `<div class="t-aside editor-log-line">${esc(line)}</div>`)
-          .join('')
+      if (!file) return
+      const out = e.target.closest('.editor-out')
+      if (out?.dataset.collapsed === 'true') {
+        // Expand first; the wire pass opens the editor once the body is visible.
+        pendingEditFile = { card: card.shortname, file }
+        api.toggleOutput?.(file)
+      } else {
+        void editOutput(el, card, file)
+      }
+    } else if (act === 'output-drop') {
+      const file = e.target.closest('[data-file]')?.dataset.file
+      if (file) void dropArtifact(card, file).then((ok) => ok && api.flagUndo?.(card.shortname, 'output'))
     }
   })
 
-  // ── Latest artifact auto-loads — the delegation output IS the point ────────
-  const latest = card.artifacts?.[card.artifacts.length - 1]
-  if (latest) void toggleArtifact(el, card, latest, { forceOpen: true })
+  // Double-click a note → edit the text in place with a save · cancel row.
+  // Mirrors the artifact editor: mousedown+preventDefault keeps focus so a blur
+  // doesn't race the save; the contenteditable field sits inside [data-open-card]
+  // so SSE re-renders defer while editing.
+  el.addEventListener('dblclick', (e) => {
+    // Double-click an output (row or body) → edit its full text, expanding first.
+    const outEl = e.target.closest('.editor-out')
+    if (outEl) {
+      e.stopPropagation()
+      const file = outEl.dataset.file
+      if (outEl.dataset.collapsed === 'true') api.toggleOutput?.(file) // persist open
+      void editOutput(el, card, file)
+      return
+    }
+    const noteEl = e.target.closest('.editor-note[data-el-id]')
+    if (!noteEl || noteEl.classList.contains('editing')) return
+    const textEl = noteEl.querySelector('.editor-note-text')
+    const acts = noteEl.querySelector('.editor-note-acts')
+    if (!textEl || !acts) return
+    e.stopPropagation()
+    const original = textEl.textContent
+    const prevActs = acts.innerHTML
+    noteEl.classList.add('editing')
+    textEl.setAttribute('contenteditable', 'plaintext-only')
+    textEl.focus()
+    acts.innerHTML =
+      `<a class="editor-note-act save" data-noteact="save">save</a>` +
+      `<span class="editor-note-sep"> · </span>` +
+      `<a class="editor-note-act" data-noteact="cancel">cancel</a>`
+    let finished = false
+    const finish = (save) => {
+      if (finished) return
+      finished = true
+      const text = textEl.textContent
+      noteEl.classList.remove('editing')
+      textEl.removeAttribute('contenteditable')
+      acts.innerHTML = prevActs
+      if (save && text !== original)
+        void elementOp(card.shortname, 'note', 'edit', { id: noteEl.dataset.elId, text })
+      else if (!save) textEl.textContent = original
+      api.flushRender()
+    }
+    acts.querySelector('[data-noteact="save"]').addEventListener('mousedown', (ev) => {
+      ev.preventDefault()
+      finish(true)
+    })
+    acts.querySelector('[data-noteact="cancel"]').addEventListener('mousedown', (ev) => {
+      ev.preventDefault()
+      finish(false)
+    })
+    textEl.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault()
+        finish(true)
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault()
+        ev.stopPropagation()
+        finish(false)
+      }
+    })
+    textEl.addEventListener('blur', () => finish(true))
+  })
 
-  // A hand-authored output just landed on this card — drop straight into editing
-  // it (the create POST seeds the cache empty, so this opens a blank editor).
+  // ── Expanded outputs load their body (content is lazy; visibility is state) ──
+  el.querySelectorAll('.editor-out[data-collapsed="false"]').forEach((out) => {
+    void loadOutputBody(el, card, out.dataset.file)
+  })
+
+  // A just-created or edit-requested output drops into editing once it's visible.
+  // (write-output seeds the cache empty, so this opens a blank editor.)
   if (
     pendingEditFile &&
     pendingEditFile.card === card.shortname &&
@@ -170,7 +291,7 @@ export function wireOpenCard(el, card, api) {
   ) {
     const f = pendingEditFile.file
     pendingEditFile = null
-    void editArtifact(el, card, f)
+    void editOutput(el, card, f)
   }
 
   // ── Initial focus ──────────────────────────────────────────────────────────
@@ -217,7 +338,69 @@ async function addArtifact(card) {
   }
   const { file } = await res.json()
   artifactCache.set(artKey(card, file), '') // seed empty so the editor opens blank
-  pendingEditFile = { card: card.shortname, file }
+  return file
+}
+
+/** Insert an inline note field at the end of the notes section — same left bar +
+ *  garamond as a real note, so the caret sits where the text will. Enter or
+ *  Cmd/Ctrl+Enter saves, Shift+Enter is a newline, Esc cancels. The `finished`
+ *  guard is load-bearing: Enter fires `done` AND the subsequent blur fires it too,
+ *  so without the guard a single note was added twice. */
+function startNoteInput(el, card, api) {
+  const items = el.querySelector('.editor-sec[data-sec="notes"] .editor-sec-items')
+  if (!items || items.querySelector('.editor-note.writing')) return
+  const wrap = document.createElement('div')
+  wrap.className = 'editor-note writing'
+  const input = document.createElement('div')
+  input.className = 'editor-note-text'
+  input.setAttribute('contenteditable', 'plaintext-only')
+  input.setAttribute('data-field', 'note') // match title/desc so SSE renders defer while typing
+  wrap.appendChild(input)
+  items.appendChild(wrap)
+  input.focus()
+  let finished = false
+  const done = (save) => {
+    if (finished) return
+    finished = true
+    const text = input.textContent.trim()
+    if (save && text) void elementOp(card.shortname, 'note', 'add', { text })
+    else api.flushRender()
+  }
+  input.addEventListener('keydown', (ev) => {
+    ev.stopPropagation()
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey || !ev.shiftKey)) {
+      ev.preventDefault()
+      done(true)
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault()
+      done(false)
+    }
+  })
+  input.addEventListener('blur', () => done(true))
+}
+
+/** Apply a declarative element op (note/date/person edit, scratch, drop, add) via
+ *  the engine. The surface sends intent; the engine reads → applyOp → writes → logs. */
+function elementOp(shortname, type, op, { id, text } = {}) {
+  return fetch(`/api/cards/${encodeURIComponent(shortname)}/op`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, op, id, text })
+  }).then((r) => {
+    if (!r.ok) console.error(`[board] element op ${type}.${op} failed: HTTP ${r.status}`)
+    return r.ok
+  })
+}
+
+/** Drop (delete) an output artifact file. Resolves true on success. */
+function dropArtifact(card, file) {
+  return fetch(
+    `/api/artifacts/${encodeURIComponent(card.shortname)}/${encodeURIComponent(file)}`,
+    { method: 'DELETE' }
+  ).then((r) => {
+    if (!r.ok) console.error(`[board] artifact drop failed: HTTP ${r.status}`)
+    return r.ok
+  })
 }
 
 function saveArtifact(card, file, raw) {
@@ -233,13 +416,12 @@ function saveArtifact(card, file, raw) {
   )
 }
 
-async function toggleArtifact(el, card, file, { forceOpen = false } = {}) {
-  const body = el.querySelector(`[data-artifact-body="${CSS.escape(file)}"]`)
-  if (!body) return
-  if (!body.hidden && !forceOpen) {
-    body.hidden = true
-    return
-  }
+/** Fill an expanded output's body with its rendered markdown (lazy-fetched, then
+ *  cached). Visibility is owned by the render (the row's collapse state); this only
+ *  loads content, so a re-render of an already-open row never re-fetches or flashes. */
+async function loadOutputBody(el, card, file) {
+  const body = el.querySelector(`[data-out-body="${CSS.escape(file)}"]`)
+  if (!body || body.classList.contains('editing')) return
   if (body.dataset.raw === undefined) {
     const key = artKey(card, file)
     if (artifactCache.has(key)) {
@@ -251,26 +433,28 @@ async function toggleArtifact(el, card, file, { forceOpen = false } = {}) {
         )
         body.dataset.raw = res.ok
           ? await res.text()
-          : `could not load artifact (HTTP ${res.status})`
+          : `could not load output (HTTP ${res.status})`
       } catch (err) {
-        body.dataset.raw = `could not load artifact: ${err}`
+        body.dataset.raw = `could not load output: ${err}`
       }
       artifactCache.set(key, body.dataset.raw)
     }
     body.innerHTML = renderMarkdown(body.dataset.raw)
   }
-  body.hidden = false
 }
 
-/** Edit an artifact in place: raw markdown, plaintext-editable, with an explicit
+/** Edit an output in place: raw markdown, plaintext-editable, with an explicit
  *  Save/Cancel bar. Save (or clicking truly outside) commits + re-renders pretty;
  *  Cancel discards. All display/cache work is synchronous so it survives any
  *  board re-render the exit may trigger; the save POSTs in the background. */
-async function editArtifact(el, card, file) {
-  const body = el.querySelector(`[data-artifact-body="${CSS.escape(file)}"]`)
+async function editOutput(el, card, file) {
+  const body = el.querySelector(`[data-out-body="${CSS.escape(file)}"]`)
   if (!body) return
-  if (body.hidden || body.dataset.raw === undefined)
-    await toggleArtifact(el, card, file, { forceOpen: true })
+  // Editing requires the body visible — reveal it (double-click may arrive collapsed).
+  const out = body.closest('.editor-out')
+  if (out) out.dataset.collapsed = 'false'
+  body.hidden = false
+  if (body.dataset.raw === undefined) await loadOutputBody(el, card, file)
   if (body.classList.contains('editing')) return
 
   body.classList.add('editing')

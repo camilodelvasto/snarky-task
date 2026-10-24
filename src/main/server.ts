@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
 import { z } from 'zod'
 import { readSnapshot } from './tasks/snapshot'
-import { writeInstruction, readCard, writeCard, readInstruction } from './tasks/files'
+import { writeInstruction, readCard, readInstruction } from './tasks/files'
 import { handleRename } from './tasks/handlers'
 import type { Engine } from './tasks/engine'
 import type { TaskdeckConfig } from './tasks/types'
@@ -78,7 +78,8 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
       ...readSnapshot(tasksDir()),
       ui: ui(),
       project: project(),
-      nav: engine().getNav()
+      nav: engine().getNav(),
+      open: engine().getOpenCard()
     })
     const msg = `data: ${snap}\n\n`
     for (const res of sseClients) {
@@ -181,7 +182,8 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
           ...readSnapshot(tasksDir()),
           ui: ui(),
           project: project(),
-          nav: engine().getNav()
+          nav: engine().getNav(),
+          open: engine().getOpenCard()
         })
         return
       }
@@ -199,10 +201,22 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
           ...readSnapshot(tasksDir()),
           ui: ui(),
           project: project(),
-          nav: engine().getNav()
+          nav: engine().getNav(),
+          open: engine().getOpenCard()
         })
         res.write(`data: ${snap}\n\n`)
         req.on('close', () => sseClients.delete(res))
+        return
+      }
+
+      // The board reports its currently-open card (click / open / close) so the
+      // feed can target it when a card-verb is typed without a #ref. Transient,
+      // in-memory, per-device — never written to the workspace.
+      if (pathname === '/api/open' && req.method === 'POST') {
+        const body = await parseBody<{ card?: string | null }>(req, res)
+        if (body === null) return
+        engine().setOpenCard(body.card ?? null)
+        json(res, 200, { ok: true })
         return
       }
 
@@ -332,6 +346,28 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
         res.end(readFileSync(filePath))
         return
       }
+      if (artMatch && req.method === 'DELETE') {
+        const card = decodeURIComponent(artMatch[1])
+        const file = decodeURIComponent(artMatch[2])
+        const dir = join(tasksDir(), 'artifacts', card)
+        const filePath = join(dir, file)
+        // Traversal guard: the resolved path must stay inside this card's artifact dir.
+        if (!filePath.startsWith(dir + sep) || !existsSync(filePath)) {
+          notFound(res)
+          return
+        }
+        // Recoverable drop through the engine — SAME path element drops take: move to
+        // .trash, record for undo (POST /api/cards/:card/restore), and log on the card.
+        // Chained per-card so it can't interleave with an in-flight write. onChange
+        // inside dropOutput refreshes the snapshot, so no explicit broadcast here.
+        try {
+          await engine().dropOutput(card, file)
+          json(res, 200, { ok: true })
+        } catch (err) {
+          json(res, 400, { error: err instanceof Error ? err.message : String(err) })
+        }
+        return
+      }
 
       // Collection route (no filename): author a blank artifact by hand. Routed
       // through the engine so the card log is stamped and the row surfaces — the
@@ -343,6 +379,46 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
           json(res, 201, { file })
         } catch (err) {
           json(res, 404, { error: err instanceof Error ? err.message : String(err) })
+        }
+        return
+      }
+
+      // Declarative element op from the open card (edit/scratch/drop/add). The
+      // engine reads the card, applies the pure op, writes + logs. Throws (→ 400)
+      // on a missing card or an op the type doesn't declare — never silent.
+      const cardOpMatch = pathname.match(/^\/api\/cards\/([^/]+)\/op$/)
+      if (cardOpMatch && req.method === 'POST') {
+        const shortname = decodeURIComponent(cardOpMatch[1])
+        const body = await parseBody<{ type?: string; op?: string; id?: string; text?: string }>(
+          req,
+          res
+        )
+        if (body === null) return
+        if (!body.type || !body.op) {
+          json(res, 400, { error: 'element op needs type and op' })
+          return
+        }
+        try {
+          await engine().applyElementOp(shortname, body.type, body.op, {
+            id: body.id,
+            text: body.text
+          })
+          json(res, 200, { ok: true })
+        } catch (err) {
+          json(res, 400, { error: err instanceof Error ? err.message : String(err) })
+        }
+        return
+      }
+
+      // Undo the most recent drop (element or output) on a card.
+      const restoreMatch = pathname.match(/^\/api\/cards\/([^/]+)\/restore$/)
+      if (restoreMatch && req.method === 'POST') {
+        const shortname = decodeURIComponent(restoreMatch[1])
+        try {
+          await engine().restoreLastDrop(shortname)
+          json(res, 200, { ok: true })
+        } catch (err) {
+          json(res, 400, { error: err instanceof Error ? err.message : String(err) })
         }
         return
       }
@@ -375,8 +451,11 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
           }
           const card = readCard(cardPath)
           // Description first (in place), so a following reslug copies it along.
+          // Route through the element op so it updates the lead text element
+          // rather than the create-only legacy reconcile (which no-ops when a
+          // lead already exists).
           if (body.description !== undefined)
-            writeCard(tasksDir(), { ...card, description: body.description })
+            await engine().applyElementOp(shortname, 'text', 'edit', { text: body.description })
           // A title change lets the slug follow: handleRename reslugs via
           // copy/delete when the title maps to a new id, or updates in place when
           // it maps back to the same one. Only run it when the title actually changed.

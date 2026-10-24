@@ -89,5 +89,13 @@
   "rename": {
     "class": "normal",
     "target": "required"
+  },
+  "reslug": {
+    "class": "destructive",
+    "target": "required"
+  },
+  "describe": {
+    "class": "normal",
+    "target": "required"
   }
 }

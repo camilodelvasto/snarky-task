@@ -10,6 +10,7 @@ export interface CliDeps {
   dates: Dates
   now: Date
   targetPolicy: Record<string, TargetPolicy> // per-action open-target policy (keyed by action)
+  openCard?: string // the card currently open on the board — a card-verb typed with no #ref targets it
 }
 
 export const SCOPES: Scope[] = ['card', 'full', 'board']
@@ -25,6 +26,8 @@ export interface CliCommand {
     | 'label'
     | 'unlabel'
     | 'rename'
+    | 'reslug'
+    | 'describe'
     | 'open'
   card?: string
   card2?: string
@@ -70,6 +73,8 @@ const VERBS = [
   'delete',
   'delegate',
   'rename',
+  'reslug',
+  'describe',
   'open'
 ] as const
 type Verb = (typeof VERBS)[number]
@@ -88,6 +93,8 @@ const ACTION: Record<Verb, CliCommand['action']> = {
   delete: 'delete',
   delegate: 'delegate',
   rename: 'rename', // rename #card <new title> — slug follows (copy/delete)
+  reslug: 'reslug', // reslug #old #new — change the slug directly, title untouched
+  describe: 'describe', // describe #card <text> — set the card body (description)
   open: 'open' // open #card — UI nav; opens the card on the board
 }
 
@@ -104,9 +111,10 @@ const NEEDS_CARD: Verb[] = [
   'delete',
   'delegate',
   'rename',
+  'describe',
   'open'
 ]
-const TAKES_TEXT: Verb[] = ['create', 'note', 'delegate', 'rename']
+const TAKES_TEXT: Verb[] = ['create', 'note', 'delegate', 'rename', 'describe']
 
 /** Normalize to the full-field shape every CliResult carries (consistent matching). */
 function finalize(c: CliCommand): CliCommand {
@@ -202,6 +210,27 @@ export function parseCommand(raw: string, deps: CliDeps): CliResult {
   // token, unknown leading @word) keep their declined/forced-error behavior untouched.
   const fail = (msg: string): CliResult => ({ kind: 'error', error: msg })
 
+  // reslug #old #new — change a card's slug directly (title untouched). Parsed
+  // positionally: first bare/#token is the existing card, second is the desired
+  // slug. The new slug deliberately does NOT yet name a card, so the generic
+  // #ref-if-exists rule can't carry it — handle the whole verb here and bail.
+  // The new slug rides as cmd.title so it survives the destructive confirmation
+  // round-trip (opts are rebuilt from frontmatter, which already carries title).
+  if (verb === 'reslug') {
+    const slugish = /^[a-z0-9-]+$/
+    const words = args
+      .filter((a) => !a.startsWith('$') && !a.startsWith('@') && !a.startsWith('^') && !a.startsWith('--'))
+      .map((a) => (a.startsWith('#') ? a.slice(1) : a).toLowerCase())
+    const [oldSlug, newSlug] = words
+    if (!oldSlug || !newSlug) return fail('reslug needs #old #new — the card and its new slug')
+    if (!deps.shortnames.has(oldSlug)) return fail(`no card "#${oldSlug}"`)
+    if (!slugish.test(newSlug)) return fail(`"${newSlug}" is not a valid slug ([a-z0-9-])`)
+    if (newSlug === oldSlug) return fail(`#${oldSlug} already has that slug`)
+    if (deps.shortnames.has(newSlug))
+      return fail(`cannot reslug to #${newSlug} — a card already uses that slug`)
+    return { kind: 'claimed', cmd: finalize({ action: 'reslug', card: oldSlug, title: newSlug, tags: [] }) }
+  }
+
   const cmd: CliCommand = { action: ACTION[verb], tags: [] }
   const free: string[] = []
 
@@ -275,6 +304,14 @@ export function parseCommand(raw: string, deps: CliDeps): CliResult {
   const desc = restLines.join('\n').trim()
   if (desc) cmd.desc = cmd.desc ? `${cmd.desc}\n${desc}` : desc
 
+  // describe sets the card body — all the text (first line + continuations) is
+  // the new description, not a title. Fold both into desc and clear title.
+  if (verb === 'describe') {
+    const body = [cmd.title, cmd.desc].filter(Boolean).join('\n')
+    cmd.desc = body || undefined
+    cmd.title = undefined
+  }
+
   // Multiline note: text on continuation lines is still the note text —
   // `note #card ⏎ the thought` must not fail "note needs text". Folded to one
   // line because a note is a single log entry.
@@ -331,17 +368,27 @@ export function parseCommand(raw: string, deps: CliDeps): CliResult {
   if (verb === 'note' && !cmd.title) return fail('note needs text')
   if (verb === 'move' && !cmd.to) return fail('move needs a $status')
   if (NEEDS_CARD.includes(verb) && !cmd.card) {
-    const policy = deps.targetPolicy[ACTION[verb]] ?? 'required'
-    // resolve: free text names the card — narrow model pick (bare input only;
-    // `/` promises no model and fails loud).
-    if (policy === 'resolve' && text && !forced)
-      return { kind: 'needs-card', cmd: finalize({ ...cmd, title: undefined }), query: text }
-    // create: free text is the brief — the work creates its own workspace.
-    if (policy === 'create' && cmd.title) {
-      if (verb === 'delegate' && !cmd.with) return fail('delegate needs a @collaborator')
-      return { kind: 'claimed', cmd: finalize(cmd) }
+    // Open-card fallback (declarative): a card-verb typed with no #ref targets the
+    // card currently open on the board. Applied AFTER parsing — so it works for
+    // multiline input, where a trailing #ref could never be tokenized (only the
+    // first line is). Excludes `open` (navigating *to* a card — inheriting the
+    // already-open one is nonsensical); an explicit #ref binds cmd.card earlier
+    // and never reaches here, so it always wins. reslug names both slugs itself.
+    if (deps.openCard && verb !== 'open' && deps.shortnames.has(deps.openCard)) {
+      cmd.card = deps.openCard
+    } else {
+      const policy = deps.targetPolicy[ACTION[verb]] ?? 'required'
+      // resolve: free text names the card — narrow model pick (bare input only;
+      // `/` promises no model and fails loud).
+      if (policy === 'resolve' && text && !forced)
+        return { kind: 'needs-card', cmd: finalize({ ...cmd, title: undefined }), query: text }
+      // create: free text is the brief — the work creates its own workspace.
+      if (policy === 'create' && cmd.title) {
+        if (verb === 'delegate' && !cmd.with) return fail('delegate needs a @collaborator')
+        return { kind: 'claimed', cmd: finalize(cmd) }
+      }
+      return fail(`${verb} needs a #card`)
     }
-    return fail(`${verb} needs a #card`)
   }
   if (verb === 'create' && !cmd.title) return fail('create needs a title')
   if (verb === 'link' && !cmd.card2) return fail('link needs two #cards')

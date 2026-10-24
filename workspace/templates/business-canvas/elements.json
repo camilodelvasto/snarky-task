@@ -1,0 +1,8 @@
+{
+  "text":   { "schema": "text.v1.json",   "lead": true,            "ops": ["edit"] },
+  "note":   { "schema": "note.v1.json",   "section": "Notes",      "ops": ["add","edit","scratch","drop"] },
+  "date":   { "schema": "date.v1.json",   "section": "Dates",      "ops": ["add","edit","drop"] },
+  "person": { "schema": "person.v1.json", "section": "People",     "ops": ["add","edit","drop"] },
+  "output": { "schema": "output.v1.json", "storage": "fs",         "ops": ["add","edit","drop"] },
+  "log":    { "schema": "log.v1.json",    "section": "Log", "system": true, "ops": ["append"] }
+}

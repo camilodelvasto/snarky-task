@@ -1,7 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { validateCard, validateInstruction, formatErrors } from '../tasks/validate'
+import { validateCard, validateInstruction, validateElement, formatErrors } from '../tasks/validate'
+
+// Minimal element-type registry for validateElement tests
+const testTypes: Record<string, { schema: string }> = {
+  note:   { schema: 'note.v1.json' },
+  text:   { schema: 'text.v1.json' },
+  date:   { schema: 'date.v1.json' },
+}
 
 const okCard = {
   v: 1,
@@ -43,9 +50,17 @@ describe('validateCard', () => {
     ).toBe(true)
   })
   it('rejects an unsupported schema version', () => {
-    expect(validateCard({ ...okCard, v: 2 })).toEqual([
-      { field: 'v', message: 'schema version 2 not supported' }
+    // v:3 is not yet defined; v:2 is now supported
+    expect(validateCard({ ...okCard, v: 3 })).toEqual([
+      { field: 'v', message: 'schema version 3 not supported' }
     ])
+  })
+  it('accepts a valid v:2 card', () => {
+    expect(validateCard({ v: 2, id: 'cabc1', title: 'X', status: 'active', created: '2026-10-22', links: [], labels: [] })).toEqual([])
+  })
+  it('rejects a v:2 card missing the id field', () => {
+    const errs = validateCard({ v: 2, title: 'X', status: 'active', created: '2026-10-22', links: [], labels: [] })
+    expect(errs.some((e) => e.field === 'id' || e.message.includes('id'))).toBe(true)
   })
 })
 
@@ -63,6 +78,29 @@ describe('validateInstruction', () => {
   })
 })
 
+describe('validateElement', () => {
+  it('returns no errors for a valid note element', () => {
+    expect(validateElement('note', { at: '2026-10-22T10:00:00Z', text: 'hello' }, testTypes)).toEqual([])
+  })
+  it('reports missing required field (note missing text)', () => {
+    const errs = validateElement('note', { at: '2026-10-22T10:00:00Z' }, testTypes)
+    expect(errs.some((e) => e.field === 'text' || e.message.includes('text'))).toBe(true)
+  })
+  it('reports unknown element type', () => {
+    const errs = validateElement('unicorn', { anything: 1 }, testTypes)
+    expect(errs.length).toBe(1)
+    expect(errs[0].message).toMatch(/unknown.*type|type.*unknown/i)
+  })
+  it('reports note missing both required fields (at and text)', () => {
+    const errs = validateElement('note', {}, testTypes)
+    expect(errs.length).toBeGreaterThanOrEqual(2)
+  })
+  it('reports schema violation (wrong type for text field)', () => {
+    const errs = validateElement('note', { at: '2026-10-22T10:00:00Z', text: 42 }, testTypes)
+    expect(errs.some((e) => e.field === 'text' || e.message.includes('text'))).toBe(true)
+  })
+})
+
 describe('formatErrors', () => {
   it('joins field: message pairs', () => {
     expect(
@@ -75,8 +113,8 @@ describe('formatErrors', () => {
 })
 
 describe('schema ↔ writer drift', () => {
-  // Keys writeCard emits into frontmatter (see files.ts writeCard):
-  const cardKeys = ['v', 'title', 'status', 'created', 'due', 'links', 'labels']
+  // Keys writeCard emits into frontmatter (see files.ts writeCard) — now v:2 with id
+  const cardKeys = ['v', 'id', 'title', 'status', 'created', 'due', 'links', 'labels']
   // Keys writeInstruction/patchInstruction emit (see files.ts):
   const instrKeys = [
     'v',
@@ -101,9 +139,9 @@ describe('schema ↔ writer drift', () => {
     'device'
   ]
 
-  it('every card writer key is a declared card schema property', () => {
+  it('every card writer key is a declared card v2 schema property', () => {
     const cardSchema = JSON.parse(
-      readFileSync(join(__dirname, '../tasks/schema/card.v1.json'), 'utf-8')
+      readFileSync(join(__dirname, '../tasks/schema/card.v2.json'), 'utf-8')
     )
     for (const k of cardKeys) {
       expect(Object.keys(cardSchema.properties)).toContain(k)

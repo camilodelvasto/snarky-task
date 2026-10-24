@@ -1,6 +1,15 @@
 // src/main/tasks/engine.ts
 import { watch, FSWatcher } from 'chokidar'
-import { readdirSync, rmSync, existsSync, mkdirSync, renameSync, readFileSync } from 'fs'
+import {
+  readdirSync,
+  rmSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  readFileSync,
+  writeFileSync,
+  appendFileSync
+} from 'fs'
 import { join } from 'path'
 import matter from 'gray-matter'
 import {
@@ -9,9 +18,12 @@ import {
   writeInstruction,
   appendLog,
   readCard,
+  writeCard,
   writeFileAtomic
 } from './files'
-import { validateCard, validateInstruction, formatErrors } from './validate'
+import { validateCard, validateInstruction, validateElement, formatErrors } from './validate'
+import { loadElements, BUNDLED } from './elements/registry'
+import { applyOp } from './elements/ops'
 import { readSnapshot } from './snapshot'
 import { prepass } from './prepass'
 import { diffCard, type CardFacts } from './reconcile'
@@ -24,7 +36,9 @@ import {
   handleDelete,
   handleLabel,
   handleUnlabel,
-  handleRename
+  handleRename,
+  handleReslug,
+  handleDescribe
 } from './handlers'
 import { parseCommand } from './cli'
 import { buildDelegationContext } from './context'
@@ -85,6 +99,11 @@ export class Engine {
   // delivered in the snapshot. A monotonic seq lets the board act exactly once.
   private navState?: { card: string; seq: number }
   private navSeq = 0
+  // The card currently open on the board (device-local UI state, set by the
+  // surfaces on open/click/close). Surfaced in the snapshot so the feed can
+  // target it when a card-verb is typed without a #ref. Lives only in memory —
+  // a new engine (project switch) starts with nothing open.
+  private openCardName?: string
 
   constructor(deps: EngineDeps) {
     this.deps = deps
@@ -219,6 +238,123 @@ export class Engine {
   /** Latest transient UI nav request (an `open #card`), for the snapshot. */
   getNav(): { card: string; seq: number } | undefined {
     return this.navState
+  }
+
+  /** The card currently open on the board (for the snapshot), or undefined. */
+  getOpenCard(): string | undefined {
+    return this.openCardName
+  }
+
+  /** Surfaces report their open/closed card here; broadcasts so the feed updates. */
+  setOpenCard(card: string | null): void {
+    this.openCardName = card ?? undefined
+    this.deps.onChange()
+  }
+
+  /**
+   * Apply a declarative element op to a card's content (the surfaces' edit path).
+   * Reads the card, runs the pure `applyOp` (which throws on an undeclared op or a
+   * missing id), writes the result, logs the change, and broadcasts. `note.add`
+   * is stamped with the current time here — the surface only sends the text.
+   */
+  applyElementOp(
+    shortname: string,
+    type: string,
+    op: string,
+    args: { id?: string; text?: string }
+  ): Promise<void> {
+    // Serialize on the card's chain — the SAME per-card queue instruction
+    // processing uses — so a user edit and an in-flight instruction (e.g. a
+    // delegation writing an output) never read-modify-write over each other.
+    const run = async (): Promise<void> => {
+      const path = join(this.deps.tasksDir, 'cards', `${shortname}.md`)
+      if (!existsSync(path)) throw new Error(`card not found: ${shortname}`)
+      const card = readCard(path)
+      const stamp = this.now().toISOString().slice(0, 16).replace('T', ' ')
+      // A drop is recoverable: tuck the element into .trash before applyOp removes
+      // it, so restoreLastDrop can bring it back with its id + content intact.
+      if (op === 'drop') {
+        const dropped = card.elements.find((e) => e.id === args.id)
+        if (dropped) this.trashRecord(shortname, { ts: stamp, kind: 'element', element: dropped })
+      }
+      const fullArgs = op === 'add' ? { ...args, at: stamp } : args
+      const elements = applyOp(card.elements, type, op, fullArgs, BUNDLED)
+      writeCard(this.deps.tasksDir, { ...card, elements })
+      appendLog(path, `${stamp} — ${type} ${op}`)
+      this.refreshCardFacts()
+      this.deps.onChange()
+    }
+    return this.chain(shortname, run)
+  }
+
+  /** Append a recoverable deletion to the card's greppable trash log. */
+  private trashRecord(shortname: string, record: object): void {
+    const dir = join(this.deps.tasksDir, '.trash')
+    mkdirSync(dir, { recursive: true })
+    appendFileSync(join(dir, `${shortname}.jsonl`), JSON.stringify(record) + '\n')
+  }
+
+  /** Drop an output file recoverably: move it into .trash, record it so
+   *  restoreLastDrop can move it back, and log it on the card — the same
+   *  trash + activity path element drops take. Throws if the file is missing
+   *  (fail loud). Serialized on the card's chain. */
+  dropOutput(shortname: string, file: string): Promise<void> {
+    const run = async (): Promise<void> => {
+      const src = join(this.deps.tasksDir, 'artifacts', shortname, file)
+      if (!existsSync(src)) throw new Error(`output not found: ${file}`)
+      const stamp = this.now().toISOString().slice(0, 16).replace('T', ' ')
+      const trashDir = join(this.deps.tasksDir, '.trash', 'artifacts', shortname)
+      mkdirSync(trashDir, { recursive: true })
+      renameSync(src, join(trashDir, file))
+      this.trashRecord(shortname, { ts: stamp, kind: 'output', file })
+      const cardPath = join(this.deps.tasksDir, 'cards', `${shortname}.md`)
+      if (existsSync(cardPath)) appendLog(cardPath, `${stamp} — output drop (${file})`)
+      this.refreshCardFacts()
+      this.deps.onChange()
+    }
+    return this.chain(shortname, run)
+  }
+
+  /** Undo the most recent drop on a card — re-insert the element, or move the
+   *  output file back from .trash. Serialized on the card's chain. */
+  restoreLastDrop(shortname: string): Promise<void> {
+    const run = async (): Promise<void> => {
+      const trashPath = join(this.deps.tasksDir, '.trash', `${shortname}.jsonl`)
+      const lines = existsSync(trashPath)
+        ? readFileSync(trashPath, 'utf-8').split('\n').filter(Boolean)
+        : []
+      if (!lines.length) throw new Error(`nothing to undo for #${shortname}`)
+      const last = JSON.parse(lines[lines.length - 1])
+      writeFileSync(trashPath, lines.slice(0, -1).map((l) => l + '\n').join(''))
+      const stamp = this.now().toISOString().slice(0, 16).replace('T', ' ')
+      const cardPath = join(this.deps.tasksDir, 'cards', `${shortname}.md`)
+      if (last.kind === 'element' && existsSync(cardPath)) {
+        const card = readCard(cardPath)
+        writeCard(this.deps.tasksDir, { ...card, elements: [...card.elements, last.element] })
+        appendLog(cardPath, `${stamp} — restored ${last.element.type}`)
+      } else if (last.kind === 'output') {
+        const from = join(this.deps.tasksDir, '.trash', 'artifacts', shortname, last.file)
+        if (existsSync(from)) {
+          const destDir = join(this.deps.tasksDir, 'artifacts', shortname)
+          mkdirSync(destDir, { recursive: true })
+          renameSync(from, join(destDir, last.file))
+        }
+      }
+      this.refreshCardFacts()
+      this.deps.onChange()
+    }
+    return this.chain(shortname, run)
+  }
+
+  /** Enqueue work on a card's per-card chain (shared with instruction processing)
+   *  so reads+writes never interleave; a thrown op doesn't poison the chain. */
+  private chain(shortname: string, run: () => Promise<void>): Promise<void> {
+    const chained = (this.chains.get(shortname) ?? Promise.resolve()).then(run)
+    this.chains.set(
+      shortname,
+      chained.catch(() => {})
+    )
+    return chained
   }
 
   private track(p: Promise<void>): void {
@@ -380,6 +516,22 @@ export class Engine {
       ]
       let total = 0
       const bad: string[] = []
+
+      // Load element types once — if elements.json is absent, element validation is skipped
+      // silently (legacy/migrating project). If the file exists but is malformed, report it.
+      let elementTypes: Record<string, { schema: string }> | null = null
+      const elementsJsonPath = join(tasksDir, 'elements.json')
+      if (existsSync(elementsJsonPath)) {
+        try {
+          const loaded = loadElements(tasksDir)
+          elementTypes = loaded.types
+        } catch (err) {
+          bad.push(
+            `elements.json: unreadable (${err instanceof Error ? err.message : String(err)})`
+          )
+        }
+      }
+
       for (const [sub, check] of dirs) {
         const d = join(tasksDir, sub)
         if (!existsSync(d)) continue
@@ -390,6 +542,17 @@ export class Engine {
             const { data } = matter(readFileSync(join(d, f), 'utf-8'))
             const errs = check(data)
             if (errs.length) bad.push(`${sub}/${f}: ${formatErrors(errs)}`)
+
+            // For cards, also validate each element's data against its type schema
+            if (sub === 'cards' && elementTypes !== null) {
+              const card = readCard(join(d, f))
+              for (const el of card.elements) {
+                const elErrs = validateElement(el.type, el.data, elementTypes)
+                if (elErrs.length) {
+                  bad.push(`${sub}/${f} element[${el.id}]: ${formatErrors(elErrs)}`)
+                }
+              }
+            }
           } catch (err) {
             bad.push(
               `${sub}/${f}: unreadable (${err instanceof Error ? err.message : String(err)})`
@@ -444,7 +607,8 @@ export class Engine {
         now: this.now(),
         targetPolicy: Object.fromEntries(
           Object.entries(registry).map(([k, v]) => [k, v.target ?? 'required'])
-        )
+        ),
+        openCard: this.openCardName
       })
 
       if (parsed.kind === 'error') {
@@ -637,6 +801,20 @@ export class Engine {
       return
     }
 
+    // No silent degradation, but no brick either: an action the parser claimed
+    // that this (possibly hand-edited or stale) registry doesn't define parks
+    // loud instead of crashing at registry[action].class on every boot.
+    if (!registry[action]) {
+      this.setStatus(path, {
+        status: 'attention',
+        action,
+        card,
+        error: `no registry entry for action "${action}" — add it to registry.json`,
+        ...this.telemetry(path, via)
+      })
+      return
+    }
+
     if (registry[action].class === 'destructive') {
       const id = path.split('/').pop()!.replace(/\.md$/, '')
       this.setStatus(path, {
@@ -709,6 +887,8 @@ export class Engine {
           if (!opts?.with) throw new Error('delegate needs a collaborator')
           await this.delegateToCollaborator(card!, opts.with, opts?.title, opts?.scope)
         } else if (action === 'rename') resolvedCard = handleRename(ctx, card!, opts?.title ?? raw)
+        else if (action === 'reslug') resolvedCard = handleReslug(ctx, card!, opts?.title ?? '')
+        else if (action === 'describe') handleDescribe(ctx, card!, opts?.desc ?? '')
         else if (action === 'open') {
           // UI nav, not a file op: publish a transient open request the board
           // picks up over the snapshot. The card was resolved like any card verb.

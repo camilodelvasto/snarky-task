@@ -5,7 +5,8 @@ import {
   readFileSync,
   renameSync,
   writeFileSync,
-  copyFileSync
+  copyFileSync,
+  statSync
 } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomBytes } from 'crypto'
@@ -76,6 +77,38 @@ export function ensureProjectDirs(tasksDir: string): void {
     mkdirSync(join(tasksDir, s), { recursive: true })
 }
 
+/**
+ * Backfills missing files from `appTemplatesDir` into `root/templates/`.
+ * Walks `appTemplatesDir` recursively; for every FILE at relative path `rel`,
+ * copies it to `join(root, 'templates', rel)` ONLY if that destination does not
+ * already exist. Existing files are never overwritten (user customisations safe).
+ * This subsumes the old "copy everything when templates/ is absent" case and also
+ * backfills individual missing files (e.g. elements.json) into an existing templates/.
+ * Safe to call on every boot; no-ops when appTemplatesDir is falsy or absent.
+ */
+export function syncBundledTemplates(root: string, appTemplatesDir: string): void {
+  if (!appTemplatesDir || !existsSync(appTemplatesDir)) return
+  const destBase = join(root, 'templates')
+
+  function walk(srcDir: string, relDir: string): void {
+    for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name
+      const srcPath = join(srcDir, entry.name)
+      const destPath = join(destBase, rel)
+      if (entry.isDirectory()) {
+        walk(srcPath, rel)
+      } else if (statSync(srcPath).isFile()) {
+        if (!existsSync(destPath)) {
+          mkdirSync(join(destPath, '..'), { recursive: true })
+          copyFileSync(srcPath, destPath)
+        }
+      }
+    }
+  }
+
+  walk(appTemplatesDir, '')
+}
+
 export function migrateWorkspace(root: string): boolean {
   const legacy = join(root, 'tasks')
   const projects = join(root, 'projects')
@@ -88,7 +121,7 @@ export function migrateWorkspace(root: string): boolean {
         const tasks = projectTasksDir(root, 'default')
         for (const s of ['queue', 'cards', 'history', 'artifacts'])
           mkdirSync(join(tasks, s), { recursive: true })
-        for (const f of ['config.json', 'registry.json']) {
+        for (const f of ['config.json', 'registry.json', 'elements.json']) {
           const src = join(tplDefault, f)
           if (existsSync(src)) copyFileSync(src, join(tasks, f))
         }
@@ -116,7 +149,7 @@ export function ensureDefaultProject(root: string): void {
   for (const s of ['queue', 'cards', 'history', 'artifacts'])
     mkdirSync(join(tasks, s), { recursive: true })
   const tplDefault = join(root, 'templates', 'default')
-  for (const f of ['config.json', 'registry.json']) {
+  for (const f of ['config.json', 'registry.json', 'elements.json']) {
     const dest = join(tasks, f)
     if (!existsSync(dest)) {
       const src = join(tplDefault, f)
@@ -174,7 +207,7 @@ export function createProject(root: string, name: string, now: Date, template?: 
   const tplDir = template ? join(root, 'templates', template) : undefined
   const defaults = projectTasksDir(root, 'default')
   const tplDefault = join(root, 'templates', 'default')
-  for (const f of ['config.json', 'registry.json']) {
+  for (const f of ['config.json', 'registry.json', 'elements.json']) {
     const fromTpl = tplDir && existsSync(join(tplDir, f)) ? join(tplDir, f) : undefined
     const fromDefault = existsSync(join(defaults, f)) ? join(defaults, f) : undefined
     const fromTplDefault = existsSync(join(tplDefault, f)) ? join(tplDefault, f) : undefined
@@ -185,8 +218,13 @@ export function createProject(root: string, name: string, now: Date, template?: 
   if (tplDir && existsSync(join(tplDir, 'cards'))) {
     for (const f of readdirSync(join(tplDir, 'cards')).filter((n) => n.endsWith('.md'))) {
       const card = readCard(join(tplDir, 'cards', f))
+      // Reset elements so the new project card starts fresh — we want the template's
+      // description/notes/labels but NOT its historical log or old element ids.
+      // Passing elements:[] forces the reconcile to build purely from the legacy fields
+      // provided here (description, notes from template; log reset to now).
       writeCard(tasks, {
         ...card,
+        elements: [],
         created: now.toISOString().slice(0, 10),
         log: [`${stamp(now)} — created`]
       })

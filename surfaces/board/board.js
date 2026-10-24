@@ -24,16 +24,35 @@ export const state = {
   open: null, // shortname of the expanded card, or null
   editTitle: false,
   openCard: null, // legacy alias kept for keyboard.js reads; mirrors `open`
-  projectMenu: false
+  projectMenu: false,
+  // Per-card section/output collapse, device-local and in-memory: persists across
+  // SSE re-renders within a session (keyed `shortname/section` and `shortname/file`).
+  collapse: { sections: {}, outputs: {} },
+  // The latest recoverable drop, surfaced as an undo line in the card's activity.
+  pendingUndo: null // { shortname, label } | null
 }
 
 let renderQueued = false
 let renderDeferred = false
 
+// Report the board's open card to the engine (device-local, in-memory, never the
+// synced workspace) so a card-verb typed with no #ref targets it. One channel for
+// open/click/close — all flow through patch(). Posted on load too, so a board that
+// reloaded on its own doesn't leave the engine holding a stale open card.
+function reportOpen() {
+  fetch('/api/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ card: state.open })
+  }).catch(() => {})
+}
+reportOpen() // on load: nothing open yet → clears any stale engine state
+
 /** Apply a partial state change and schedule exactly one render. */
 export function patch(partial) {
   Object.assign(state, partial)
   state.openCard = state.open
+  if ('open' in partial) reportOpen()
   scheduleRender()
 }
 
@@ -44,6 +63,13 @@ function scheduleRender() {
     renderQueued = false
     render()
   })
+}
+
+/** Cheap stable hash (djb2) — a card node's identity for reconciliation. */
+function cardHash(str) {
+  let h = 5381
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
 }
 
 /** True while the user is typing in an open-card field — renders defer. */
@@ -195,6 +221,39 @@ function zones(cards) {
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const root = document.getElementById('surface-root')
 
+// A recoverable drop is a command like any other, so its undo is a notification in
+// the card's activity — not a floating toast. We record the pending undo in state and
+// auto-open the activity section so the line is visible; renderOpenCard draws
+// `↩ <label> dropped · undo`. Cleared on undo (see editor.js), project switch, or a
+// timeout. State survives SSE re-renders, so the drop's own broadcast can't wipe it.
+function flagUndo(shortname, label) {
+  state.pendingUndo = { shortname, label }
+  state.collapse.sections[`${shortname}/activity`] = true // show the undo line
+  clearTimeout(flagUndo._t)
+  flagUndo._t = setTimeout(() => {
+    if (state.pendingUndo && state.pendingUndo.shortname === shortname) {
+      state.pendingUndo = null
+      scheduleRender()
+    }
+  }, 30000)
+  scheduleRender()
+}
+
+/** The open card's collapse state, as a stable value for its render sig — only the
+ *  entries belonging to this card, so one card's toggles don't rebuild another's. */
+function collapseSigFor(name) {
+  const mine = (obj) => Object.entries(obj).filter(([k]) => k.startsWith(`${name}/`))
+  return [mine(state.collapse.sections), mine(state.collapse.outputs)]
+}
+
+/** Clear the pending-undo notification (after an undo lands, or on nav away). */
+export function clearUndo() {
+  if (!state.pendingUndo) return
+  state.pendingUndo = null
+  clearTimeout(flagUndo._t)
+  scheduleRender()
+}
+
 export function els() {
   return root.querySelectorAll('[data-card]')
 }
@@ -252,7 +311,10 @@ function renderSurface(z) {
         highlightLabels: highlightLabels(),
         accents: accentLabels(),
         privateLabel: privateLabel(),
-        busy: busySet().has(openCardObj.shortname)
+        busy: busySet().has(openCardObj.shortname),
+        elementTypes: state.snapshot.elementTypes ?? {},
+        collapse: state.collapse,
+        pendingUndo: state.pendingUndo
       })
     : ''
 
@@ -361,7 +423,10 @@ function renderList() {
         highlightLabels: highlightLabels(),
         accents: accentLabels(),
         privateLabel: privateLabel(),
-        busy: busySet().has(openCardObj.shortname)
+        busy: busySet().has(openCardObj.shortname),
+        elementTypes: state.snapshot.elementTypes ?? {},
+        collapse: state.collapse,
+        pendingUndo: state.pendingUndo
       })
     : ''
   const cards = state.snapshot.cards.filter(
@@ -466,14 +531,21 @@ function render() {
   if (state.open && !state.snapshot.cards.some((c) => c.shortname === state.open)) {
     state.open = null
     state.openCard = null
+    reportOpen()
   }
 
   const before = capturePositions()
-  // innerHTML rebuild resets scroll — carry scroll positions across the render
-  // (containers matched by index per selector; layout is stable within a mode).
+  // Carry container scroll: the scroll boxes themselves (.surface-main/.rail/.col/
+  // .list-view) are rebuilt fresh each render, so their scrollTop resets — restore
+  // it after the swap. (Card nodes that get adopted keep their own scroll inherently.)
   const scrolled = Array.from(root.querySelectorAll('.surface-main, .rail, .col, .list-view'))
     .filter((el) => el.scrollTop > 0)
     .map((el) => ({ cls: el.className, top: el.scrollTop }))
+  // A rebuilt open card loses its artifact body scroll (repopulated by wireOpenCard)
+  // — carry each by file. No-op when the open card is adopted (same node, scroll kept).
+  const artifactScrolls = Array.from(root.querySelectorAll('.editor-out-body[data-out-body]'))
+    .filter((el) => el.scrollTop > 0)
+    .map((el) => ({ file: el.dataset.file, top: el.scrollTop }))
   const z = zones(state.snapshot.cards)
 
   let inner
@@ -491,9 +563,52 @@ function render() {
       inner = renderSurface(z)
   }
 
-  root.innerHTML = renderTopbar() + inner
-  // Restore scroll BEFORE flip measures the new rects, so move deltas are
-  // computed against the viewport the user is actually looking at.
+  // ── Declarative reconcile ───────────────────────────────────────────────────
+  // Build the next tree detached, then ADOPT the existing DOM node for every card
+  // whose rendered inputs are unchanged (keyed by shortname, matched by a data-sig
+  // of its source data). Only genuinely-changed cards get a fresh node — so
+  // creating or promoting a card touches that card alone, and every other node
+  // (above all the open card you're working in) keeps its DOM, scroll, focus and
+  // unsaved edits. No whole-panel teardown.
+  const next = document.createElement('div')
+  next.innerHTML = renderTopbar() + inner
+  const uiToken = JSON.stringify(state.snapshot.ui ?? {})
+  const busy = busySet()
+  const cardByName = new Map(state.snapshot.cards.map((c) => [c.shortname, c]))
+  for (const node of next.querySelectorAll('[data-card]')) {
+    const name = node.dataset.card
+    const c = cardByName.get(name)
+    const isOpen = node.hasAttribute('data-open-card')
+    node.dataset.sig = cardHash(
+      JSON.stringify([
+        c ?? name,
+        displayStatus(c ?? { shortname: name, status: '' }),
+        busy.has(name),
+        isOpen,
+        state.mode,
+        uiToken,
+        // The open card's collapse + undo are VIEW state, not in `c`. Without them
+        // in the sig, a toggle leaves the hash unchanged → the node is adopted and
+        // the freshly-rendered (expanded/collapsed) HTML is discarded. Fold them in
+        // so a toggle rebuilds the open card; unrelated renders still adopt it.
+        isOpen ? collapseSigFor(name) : 0,
+        isOpen ? state.pendingUndo : 0
+      ])
+    )
+  }
+  const live = new Map()
+  for (const el of root.querySelectorAll('[data-card]')) live.set(el.dataset.card, el)
+  let adoptedOpen = false
+  for (const fresh of next.querySelectorAll('[data-card]')) {
+    const old = live.get(fresh.dataset.card)
+    if (old && old.dataset.sig === fresh.dataset.sig) {
+      if (fresh.hasAttribute('data-open-card')) adoptedOpen = true
+      fresh.replaceWith(old) // move the live node into the next tree, state intact
+    }
+  }
+  root.replaceChildren(...Array.from(next.childNodes))
+
+  // Restore container scroll BEFORE flip measures the new rects.
   if (scrolled.length) {
     const fresh = Array.from(root.querySelectorAll('.surface-main, .rail, .col, .list-view'))
     for (const s of scrolled) {
@@ -503,20 +618,49 @@ function render() {
   }
   flip(before)
 
-  // Wire the open card's fields (idempotent — fresh DOM every render)
-  const openEl = root.querySelector('[data-open-card]')
-  if (openEl) {
-    const card = state.snapshot.cards.find((c) => c.shortname === state.open)
-    if (card)
-      wireOpenCard(openEl, card, {
-        closeOpen,
-        moveCard,
-        deleteCard,
-        emit: emitInstruction,
-        flushRender,
-        editTitle: state.editTitle
-      })
-    state.editTitle = false // focus intent consumed by the first wire
+  // Wire the open card ONLY when it was freshly built — an adopted node keeps the
+  // listeners (and loaded artifact / in-progress edit) from its previous life.
+  if (!adoptedOpen) {
+    const openEl = root.querySelector('[data-open-card]')
+    if (openEl) {
+      const card = state.snapshot.cards.find((c) => c.shortname === state.open)
+      if (card)
+        wireOpenCard(openEl, card, {
+          closeOpen,
+          moveCard,
+          deleteCard,
+          emit: emitInstruction,
+          flushRender,
+          flagUndo,
+          clearUndo,
+          // Flip a section's / output's collapse state and persist it (so a later
+          // render restores it via the sig). Returns the new open? — the editor
+          // toggles the DOM directly, avoiding a full rebuild + FLIP (which jumped).
+          toggleSection: (sec) => {
+            const k = `${card.shortname}/${sec}`
+            const def = sec === 'activity' ? false : true
+            const open = !(state.collapse.sections[k] ?? def)
+            state.collapse.sections[k] = open
+            return open
+          },
+          toggleOutput: (file) => {
+            const k = `${card.shortname}/${file}`
+            const open = !(state.collapse.outputs[k] ?? false)
+            state.collapse.outputs[k] = open
+            return open
+          },
+          editTitle: state.editTitle
+        })
+      state.editTitle = false // focus intent consumed by the first wire
+    }
+  }
+
+  // Reapply the open artifact's scroll ALWAYS — reattaching nodes into root (even
+  // an adopted open card) can reset its overflow children's scrollTop, so restore
+  // it explicitly rather than trusting the move to carry it.
+  for (const a of artifactScrolls) {
+    const fresh = root.querySelector(`.editor-out-body[data-file="${CSS.escape(a.file)}"]`)
+    if (fresh) fresh.scrollTop = a.top
   }
 }
 
@@ -641,14 +785,42 @@ function applyNav(snap) {
   }
 }
 
+// The board renders ONLY what the board shows: the cards, the ui config, the
+// active project, and the two instruction-derived bits it reflects (which cards
+// are working → shimmer, which are attention-parked → refute optimistic moves).
+// Everything else in a snapshot — the whole feed log, done-row TTL sweeps, every
+// other instruction state change — is the LEFT panel's business. Signing that
+// projection lets the board sit still through all of it: the two surfaces share
+// one event stream but are independent in what they react to.
+function boardSignature(snap) {
+  const withCard = (status) =>
+    (snap.instructions ?? [])
+      .filter((i) => i.status === status && i.card)
+      .map((i) => i.card)
+      .sort()
+  return JSON.stringify({
+    cards: snap.cards,
+    ui: snap.ui,
+    project: snap.project,
+    working: withCard('working'),
+    attention: withCard('attention')
+  })
+}
+let lastBoardSig = null
+
 const events = new EventSource('/api/events')
 events.onmessage = (e) => {
+  const snap = JSON.parse(e.data)
+  state.snapshot = snap
+  applyNav(snap) // `open #card` nav is a real intent — handled regardless of the signature
+  const sig = boardSignature(snap)
+  if (sig === lastBoardSig) return // nothing the board draws changed — stay put
+  lastBoardSig = sig
   const focused = els()[state.focusIdx]
   const focusedShortname = focused?.dataset?.card ?? null
-  state.snapshot = JSON.parse(e.data)
-  applyNav(state.snapshot)
   scheduleRender()
   requestAnimationFrame(() => {
+    if (typingInOpenCard()) return // never steal focus (and the edit) from an active field
     const activeOnBoard = document.activeElement?.closest('[data-card]') != null
     restoreFocus(focusedShortname, activeOnBoard)
   })
@@ -659,6 +831,7 @@ fetch('/api/state')
   .then((s) => {
     state.snapshot = s
     applyNav(s)
+    lastBoardSig = boardSignature(s)
     scheduleRender()
   })
 

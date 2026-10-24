@@ -5,12 +5,14 @@ import type { Card } from '../tasks/types'
 function card(over: Partial<Card> = {}): Card {
   return {
     shortname: 'draft-reply',
+    id: 'draft-reply',
     path: '/x/cards/draft-reply.md',
     title: 'Draft the reply',
     status: 'active',
     created: '2026-10-19',
     links: [],
     labels: [],
+    elements: [],
     description: 'Answer the vendor about pricing.',
     notes: [],
     log: ['2026-10-19 10:00 — created'],
