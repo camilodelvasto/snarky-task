@@ -1,4 +1,4 @@
-import { BrowserWindow, WebContentsView } from 'electron'
+import { BrowserWindow, WebContentsView, shell } from 'electron'
 import { writeFile, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { SCREENSHOT_DIR } from './screenshot-cleanup'
@@ -21,6 +21,20 @@ export class SurfaceViews {
     // webContents and a page-level listener can't cross them, so intercept in
     // the main process on ALL three — including the host window, which holds
     // keyboard focus at launch and whenever its chrome/divider is clicked.
+    // Links in cards/notes open in the system browser; the surfaces themselves
+    // never navigate away from the local server.
+    for (const wc of [this.feed.webContents, this.board.webContents]) {
+      wc.setWindowOpenHandler(({ url }) => {
+        if (/^https?:/.test(url)) void shell.openExternal(url)
+        return { action: 'deny' }
+      })
+      wc.on('will-navigate', (e, url) => {
+        if (url.startsWith(baseUrl)) return
+        e.preventDefault()
+        if (/^https?:/.test(url)) void shell.openExternal(url)
+      })
+    }
+
     for (const wc of [window.webContents, this.feed.webContents, this.board.webContents]) {
       wc.on('before-input-event', (e, input) => {
         if (

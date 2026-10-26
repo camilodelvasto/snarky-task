@@ -169,9 +169,12 @@ function persistOpenEdits() {
 /** Open a card. This is the ONE route change — `state.open` is the source of
  *  truth, and switching from an already-open card saves its edits first, so a
  *  single declarative patch exits the old card clean and grows the new one. */
+let scrollTopOnOpen = false // consumed by render(): smooth-scroll the open card into view
+
 export function openCard(card, { editTitle = false } = {}) {
   if (state.mode === 'archive') return
   if (state.open && state.open !== card.shortname) persistOpenEdits()
+  scrollTopOnOpen = true
   patch({ open: card.shortname, editTitle })
 }
 
@@ -617,6 +620,15 @@ function render() {
     }
   }
   flip(before)
+
+  // A freshly opened card renders at the top of its scroll box — glide there.
+  if (scrollTopOnOpen) {
+    scrollTopOnOpen = false
+    root
+      .querySelector('[data-open-card]')
+      ?.closest('.surface-main, .list-view')
+      ?.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
   // Wire the open card ONLY when it was freshly built — an adopted node keeps the
   // listeners (and loaded artifact / in-progress edit) from its previous life.

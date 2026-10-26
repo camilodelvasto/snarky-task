@@ -11,7 +11,7 @@
  * the generic FLIP pass in board.js reacting to state changes.
  */
 
-import { esc } from './cards.js'
+import { esc, linkify } from './cards.js'
 import { renderMarkdown } from './md.js'
 
 /**
@@ -237,6 +237,7 @@ export function wireOpenCard(el, card, api) {
     const original = textEl.textContent
     const prevActs = acts.innerHTML
     noteEl.classList.add('editing')
+    textEl.textContent = original // flatten note-link anchors — edit plain text
     textEl.setAttribute('contenteditable', 'plaintext-only')
     textEl.focus()
     acts.innerHTML =
@@ -253,7 +254,7 @@ export function wireOpenCard(el, card, api) {
       acts.innerHTML = prevActs
       if (save && text !== original)
         void elementOp(card.shortname, 'note', 'edit', { id: noteEl.dataset.elId, text })
-      else if (!save) textEl.textContent = original
+      textEl.innerHTML = linkify(save ? text : original)
       api.flushRender()
     }
     acts.querySelector('[data-noteact="save"]').addEventListener('mousedown', (ev) => {

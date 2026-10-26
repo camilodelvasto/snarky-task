@@ -595,6 +595,17 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.note-link {
+  color: #3f74c9;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, #3f74c9 45%, transparent);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.note-link:hover {
+  color: var(--accent);
+  text-decoration-color: var(--accent);
+}
 .editor-note.scratched .editor-note-text {
   color: var(--ink-4);
   text-decoration: line-through;

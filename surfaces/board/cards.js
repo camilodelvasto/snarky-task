@@ -49,6 +49,21 @@ export function esc(s) {
 }
 
 /**
+ * Escape like esc(), then turn bare http(s) URLs into anchors. target="_blank"
+ * routes the click through the shell's window-open handler (main process opens
+ * it externally) instead of navigating the surface away.
+ * @param {unknown} s
+ * @returns {string}
+ */
+export function linkify(s) {
+  return esc(s).replace(/https?:\/\/[^\s]+/g, (m) => {
+    const trail = m.match(/[.,;:!?)\]]+$/)?.[0] ?? ''
+    const url = trail ? m.slice(0, -trail.length) : m
+    return `<a class="note-link" href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>${trail}`
+  })
+}
+
+/**
  * Whether a card carries the urgent or important label.
  * @param {import('../../src/main/tasks/types.ts').Card} c
  * @returns {boolean}
@@ -277,7 +292,7 @@ export function renderOpenCard(
     ).filter(Boolean)
     return (
       `<div class="editor-note${sc}" data-el-id="${esc(e.id)}" data-el-type="note">` +
-      `<div class="editor-note-text" data-field="note">${esc(d.text ?? '')}</div>` +
+      `<div class="editor-note-text" data-field="note">${linkify(d.text ?? '')}</div>` +
       `<div class="editor-note-foot"><span class="editor-note-time">${esc(d.at ?? '')}</span>` +
       `<span class="editor-note-acts">${actions.join('<span class="editor-note-sep"> · </span>')}</span></div>` +
       `</div>`

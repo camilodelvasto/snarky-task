@@ -26,6 +26,7 @@ export class ProjectManager implements ProjectOps {
   private cfg!: TaskdeckConfig
   private name!: string
   private watcher?: FSWatcher
+  private currentPoll?: ReturnType<typeof setInterval>
   private onChange: () => void
   constructor(
     private root: string,
@@ -56,6 +57,10 @@ export class ProjectManager implements ProjectOps {
     this.watcher.on('change', onCurrentChange)
     // Also handle 'add': current file created after boot (deleted+recreated, or synced in)
     this.watcher.on('add', onCurrentChange)
+    // Polling backstop: Syncthing's rename-into-place can slip past fsevents
+    // (see Engine.sweepFs) — re-read `current` on a timer so a synced switch
+    // always lands. onCurrentChange no-ops when nothing changed.
+    this.currentPoll = setInterval(onCurrentChange, 2000)
   }
 
   private async bind(name: string): Promise<void> {
@@ -153,6 +158,7 @@ export class ProjectManager implements ProjectOps {
   }
 
   async stop(): Promise<void> {
+    if (this.currentPoll) clearInterval(this.currentPoll)
     await this.watcher?.close()
     await this.engine.stop()
   }

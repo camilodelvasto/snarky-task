@@ -8,7 +8,8 @@ import {
   renameSync,
   readFileSync,
   writeFileSync,
-  appendFileSync
+  appendFileSync,
+  statSync
 } from 'fs'
 import { join } from 'path'
 import matter from 'gray-matter'
@@ -95,6 +96,8 @@ export class Engine {
   private startedAt = new Map<string, number>()
   private doneAt = new Map<string, number>()
   private sweepTimer?: ReturnType<typeof setInterval>
+  private fsSigs = new Map<string, string>()
+  private fsSweepTimer?: ReturnType<typeof setInterval>
   // Transient UI nav: an `open #card` publishes a card for the board to expand,
   // delivered in the snapshot. A monotonic seq lets the board act exactly once.
   private navState?: { card: string; seq: number }
@@ -185,6 +188,72 @@ export class Engine {
       }
     }
     if (this.deps.config.done_ttl_s) this.sweepTimer = setInterval(() => this.sweepDone(), 5000)
+    // Polling backstop for the chokidar watchers above: sync tools (Syncthing)
+    // replace files via tmp-write + rename and preserve the remote mtime — a
+    // pattern macOS fsevents intermittently drops, leaving the UI stale until
+    // restart. Baseline every file's identity now, then stat-sweep both dirs and
+    // reconcile whatever moved. The dirs are small; a sweep is a few stats.
+    this.seedFsSigs()
+    this.fsSweepTimer = setInterval(() => this.sweepFs(), 2000)
+  }
+
+  private fsSig(path: string): string | undefined {
+    try {
+      const s = statSync(path)
+      return `${s.mtimeMs}:${s.size}:${s.ino}`
+    } catch {
+      return undefined // vanished mid-sweep; the unlink pass picks it up
+    }
+  }
+
+  private seedFsSigs(): void {
+    this.fsSigs.clear()
+    for (const dir of [this.queueDir(), join(this.deps.tasksDir, 'cards')]) {
+      let names: string[]
+      try {
+        names = readdirSync(dir).filter((n) => n.endsWith('.md'))
+      } catch {
+        continue
+      }
+      for (const n of names) {
+        const p = join(dir, n)
+        const sig = this.fsSig(p)
+        if (sig) this.fsSigs.set(p, sig)
+      }
+    }
+  }
+
+  private sweepFs(): void {
+    const cardsDir = join(this.deps.tasksDir, 'cards')
+    let changed = false
+    const seen = new Set<string>()
+    for (const dir of [this.queueDir(), cardsDir]) {
+      let names: string[]
+      try {
+        names = readdirSync(dir).filter((n) => n.endsWith('.md'))
+      } catch {
+        continue
+      }
+      for (const n of names) {
+        const p = join(dir, n)
+        seen.add(p)
+        const sig = this.fsSig(p)
+        if (!sig || this.fsSigs.get(p) === sig) continue
+        this.fsSigs.set(p, sig)
+        changed = true
+        // Same doors the watcher events use — both are idempotent, so a change
+        // chokidar DID catch costs nothing here beyond the stat.
+        if (dir === cardsDir) this.reconcileCard(p)
+        else this.track(this.processFile(p))
+      }
+    }
+    for (const p of [...this.fsSigs.keys()]) {
+      if (seen.has(p)) continue
+      this.fsSigs.delete(p)
+      this.cardFacts.delete(p)
+      changed = true
+    }
+    if (changed) this.deps.onChange()
   }
 
   /** Re-read all cards into the known-facts cache — called after engine-driven writes so
@@ -233,6 +302,7 @@ export class Engine {
     for (const w of this.watchers) await w.close()
     for (const p of this.pendingConfirm.values()) clearTimeout(p.timer)
     if (this.sweepTimer) clearInterval(this.sweepTimer)
+    if (this.fsSweepTimer) clearInterval(this.fsSweepTimer)
   }
 
   /** Latest transient UI nav request (an `open #card`), for the snapshot. */
